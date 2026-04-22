@@ -45,28 +45,31 @@ section.main > div { padding-top: 1rem; }
 """, unsafe_allow_html=True)
 
 
-@st.cache_data(show_spinner="🌾 Loading farm data…")
+@st.cache_data(ttl=300, show_spinner="🌾 Loading farm data from Google Sheets…")
 def load_data():
-    base = os.path.dirname(os.path.abspath(__file__))
+    # ── Farm Master — "Farm details" sheet (gid=0) ───────────────────────────
+    # Reads only columns BN:DQ (cols 65-120). BN = Kharif 25 Farm ID.
+    FARM_ID  = "10_bnGF7WBZ0J3aSvl8riufNbZjXAxB7wcnN3545fGzw"
+    FARM_GID = "0"   # Farm details sheet gid
+    farm_url = f"https://docs.google.com/spreadsheets/d/{FARM_ID}/export?format=csv&gid={FARM_GID}"
 
-    # ── Read ONLY BN:DQ (cols 65-120) from Farm Master ──────────────────────
-    df_full = pd.read_excel(
-        os.path.join(base, "Farm List - Master.xlsx"),
-        sheet_name="Farm details", dtype=str, keep_default_na=False
-    )
+    df_full = pd.read_csv(farm_url, dtype=str, keep_default_na=False, header=0)
     df_full.columns = [str(c).strip() for c in df_full.columns]
+    # BN:DQ = cols 65-120 (0-indexed)
     df_k = df_full.iloc[:, 65:121].copy()
     df_k.columns = [str(c).strip() for c in df_k.columns]
-    # BN = 'Kharif 25 Farm ID' — this is the join key
     df_k.rename(columns={'Kharif 25 Farm ID': 'Farm ID'}, inplace=True)
     df_k['Farm ID'] = df_k['Farm ID'].str.strip()
     df_k = df_k[df_k['Farm ID'].notna() & (df_k['Farm ID'] != '')]
 
-    # ── Libertalia master_control ────────────────────────────────────────────
-    df_lib = pd.read_excel(
-        os.path.join(base, "Libertalia.xlsx"),
-        sheet_name="master_control", dtype=str, keep_default_na=False
-    )
+    # ── Libertalia — "master_control" sheet ──────────────────────────────────
+    LIB_ID  = "14ah-7Ah690oeOXE5vT8p701LYv7PiEMx_xZycNOOrSA"
+    LIB_GID = "master_control"
+
+    # First get the sheet GID by reading sheet metadata via export
+    # We'll use the sheet name approach — export by sheet name
+    lib_url = f"https://docs.google.com/spreadsheets/d/{LIB_ID}/gviz/tq?tqx=out:csv&sheet=master_control"
+    df_lib = pd.read_csv(lib_url, dtype=str, keep_default_na=False, header=0)
     df_lib.columns = [str(c).strip() for c in df_lib.columns]
     df_lib = df_lib[['Plot code', 'polygons', 'tw location']].copy()
     df_lib.rename(columns={'Plot code': 'Farm ID'}, inplace=True)
