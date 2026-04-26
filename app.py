@@ -164,9 +164,12 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-    if st.button("🔄 Reload Data", use_container_width=True, help="Click after updating Excel file"):
-        st.cache_data.clear()
-        st.rerun()
+    # #5: Small refresh button in sidebar header area
+    col_r1, col_r2 = st.columns([3,1])
+    with col_r2:
+        if st.button("🔄", help="Reload data from Google Sheets", key="reload_btn"):
+            st.cache_data.clear()
+            st.rerun()
 
     # ── #1: Search & Select FIRST ─────────────────────────────────────────────
     st.markdown("#### 🔍 Find a Farm")
@@ -373,15 +376,42 @@ with col2:
     polygon_coords = parse_polygon(polygon_raw) if polygon_raw not in('','nan','None') else []
     tubewell_coord = parse_any(tubewell_raw)    if tubewell_raw not in('','nan','None') else None
 
+    # #1 & #3: collect meter locations — use these ON MAP instead of tubewell
+    meter_locations = {}
+    for i in [1,2]:
+        mloc = v(row,f'Kharif 25 Meter location / {i}')
+        mser = v(row,f'Kharif 25 Meter serial number / {i}')
+        if mloc and mser:
+            mc = parse_any(mloc)
+            if mc:
+                meter_locations[i] = {'coord': mc, 'serial': mser,
+                                       'active': v(row,f'Kharif 25 Meter active / {i} (Y/N)')}
+
+    # Map center: polygon > first meter > tubewell
     if polygon_coords:
         clat = sum(c[0] for c in polygon_coords)/len(polygon_coords)
         clon = sum(c[1] for c in polygon_coords)/len(polygon_coords)
-    elif tubewell_coord: clat,clon = tubewell_coord
-    else: clat,clon = 30.41,76.42
+    elif meter_locations:
+        clat,clon = list(meter_locations.values())[0]['coord']
+    elif tubewell_coord:
+        clat,clon = tubewell_coord
+    else:
+        clat,clon = 30.41,76.42
 
-    meter_serials = [v(row,f'Kharif 25 Meter serial number / {i}') for i in[1,2]
-                     if v(row,f'Kharif 25 Meter serial number / {i}')]
-    meter_str = ", ".join(meter_serials) if meter_serials else "—"
+    # #4: no location data at all
+    if not polygon_coords and not tubewell_coord and not meter_locations:
+        st.markdown("""
+        <div style="background:#161b22;border:1px solid #30363d;border-radius:12px;
+             padding:40px 24px;text-align:center;margin-top:10px">
+          <div style="font-size:2.5rem;margin-bottom:12px">📭</div>
+          <div style="color:#e6edf3;font-size:1.05rem;font-weight:600;margin-bottom:8px">Location Data Unavailable</div>
+          <div style="color:#8b949e;font-size:0.84rem;line-height:1.6">
+            This farm record exists in the Farm Master sheet<br>
+            but has no matching location data in Libertalia.<br><br>
+            <span style="color:#58a6ff">Farm details above are still complete.</span>
+          </div>
+        </div>""", unsafe_allow_html=True)
+        st.stop()
 
     m = folium.Map(location=[clat,clon], zoom_start=16, tiles="OpenStreetMap")
     folium.TileLayer(
@@ -437,72 +467,72 @@ with col2:
         rh += popup_row("Block",   block)
         ac = v(row,'Kharif 25 Acres farm / farmer reporting')
         if ac: rh += popup_row("Acres", ac)
-        rh += popup_row("Meter(s)", f'<span style="color:#3fb950;font-weight:600">{meter_str}</span>')
+        rh += popup_row("Meter(s)", f'<span style="color:#3fb950;font-weight:600">{", ".join(d["serial"] for d in meter_locations.values()) or "—"}</span>')
         rh += popup_row("Lat", f"{tubewell_coord[0]:.6f}°N")
         rh += popup_row("Lon", f"{tubewell_coord[1]:.6f}°E")
-        # #2: purple if has meter, blue if no meter
-        tw_color  = 'purple' if has_meter(row) else 'blue'
-        tw_header = '#4a0080' if has_meter(row) else '#0d2137'
-        tw_label  = '🟣 Tubewell (with meter)' if has_meter(row) else '💧 Tubewell'
-        folium.Marker(location=tubewell_coord, tooltip=tw_label,
-            popup=make_popup(tw_header, tw_label, rh, *tubewell_coord),
-            icon=folium.Icon(color=tw_color, icon='tint', prefix='fa')).add_to(m)
+        # #1: only show tubewell pin if NO meter installed
+        if not meter_locations:
+            folium.Marker(location=tubewell_coord, tooltip="💧 Tubewell (no meter)",
+                popup=make_popup('#0d2137','💧 Tubewell',rh,*tubewell_coord),
+                icon=folium.Icon(color='blue',icon='tint',prefix='fa')).add_to(m)
 
-    for i in [1,2]:
-        mloc = v(row,f'Kharif 25 Meter location / {i}')
-        mser = v(row,f'Kharif 25 Meter serial number / {i}')
-        mact = v(row,f'Kharif 25 Meter active / {i} (Y/N)')
-        if mloc:
-            mc = parse_any(mloc)
-            if mc:
-                rh  = popup_row("Serial", f'<b>{mser}</b>')
-                rh += popup_row("Active", mact)
-                rh += popup_row("Lat", f"{mc[0]:.6f}°N")
-                rh += popup_row("Lon", f"{mc[1]:.6f}°E")
-                folium.Marker(location=mc, tooltip=f"💧 Meter {i}: {mser}",
-                    popup=make_popup('#3a0000',f'💧 Water Meter {i}',rh,*mc,mw=250),
-                    icon=folium.Icon(color='darkblue',icon='tint',prefix='fa')).add_to(m)
+    # #1 & #3: show BOTH meters at their own locations (purple pins)
+    for i, mdata in meter_locations.items():
+        mc   = mdata['coord']
+        mser = mdata['serial']
+        mact = mdata['active']
+        rh  = popup_row("Serial", f'<b>{mser}</b>')
+        rh += popup_row("Active", mact)
+        rh += popup_row("Farmer", farmer_name)
+        rh += popup_row("Phone",  farmer_phone)
+        rh += popup_row("Lat", f"{mc[0]:.6f}°N")
+        rh += popup_row("Lon", f"{mc[1]:.6f}°E")
+        folium.Marker(location=mc, tooltip=f"🟣 Meter {i}: {mser}",
+            popup=make_popup('#4a0080',f'🟣 Water Meter {i}',rh,*mc,mw=260),
+            icon=folium.Icon(color='purple',icon='tint',prefix='fa')).add_to(m)
 
+    # #2: PVC Pipes — custom pipe emoji icon
     for i in [1,2,3,4,5]:
         ploc  = v(row,f'Kharif 25 PVC Pipe location / {i}')
         pcode = v(row,f'Kharif 25 PVC Pipe code / {i}')
         if ploc:
             pc = parse_any(ploc)
             if pc:
-                rh  = popup_row("Code", f'<b>{pcode}</b>')
+                rh  = popup_row("Code",   f'<b>{pcode}</b>')
                 rh += popup_row("Farmer", farmer_name)
-                rh += popup_row("Lat",  f"{pc[0]:.6f}°N")
-                rh += popup_row("Lon",  f"{pc[1]:.6f}°E")
-                # #2: all pipes in red
+                rh += popup_row("Phone",  farmer_phone)
+                rh += popup_row("Lat",    f"{pc[0]:.6f}°N")
+                rh += popup_row("Lon",    f"{pc[1]:.6f}°E")
+                pipe_icon = folium.DivIcon(
+                    html=('<div style="background:#c0392b;color:white;border-radius:50%;'
+                          'width:26px;height:26px;display:flex;align-items:center;'
+                          'justify-content:center;font-size:13px;border:2px solid #fff;'
+                          'box-shadow:0 2px 4px rgba(0,0,0,0.5)">🪧</div>'),
+                    icon_size=(26,26), icon_anchor=(13,13)
+                )
                 folium.Marker(location=pc, tooltip=f"🔴 Pipe {i}: {pcode}",
-                    popup=make_popup('#3a0000',f'🔴 PVC Pipe {i}',rh,*pc,mw=230),
-                    icon=folium.Icon(color='red',icon='wrench',prefix='fa')).add_to(m)
+                    popup=make_popup('#7b0000',f'🔴 PVC Pipe {i}',rh,*pc,mw=230),
+                    icon=pipe_icon).add_to(m)
 
     folium.LayerControl().add_to(m)
     st_folium(m, width=None, height=490, returned_objects=[])
 
     # Dynamic legend
     parts = ['<span style="color:#3fb950">■</span> Farm Polygon'] if polygon_coords else []
-    if tubewell_coord:
-        if has_meter(row):
-            parts.append('<span style="color:#9b59b6">●</span> Tubewell (with meter)')
-        else:
-            parts.append('<span style="color:#58a6ff">●</span> Tubewell')
-    if any(parse_any(v(row,f'Kharif 25 Meter location / {i}')) for i in[1,2]):
-        parts.append('<span style="color:#1a53ff">●</span> Water Meter')
+    if tubewell_coord and not meter_locations:
+        parts.append('<span style="color:#58a6ff">●</span> Tubewell')
+    if meter_locations:
+        parts.append('<span style="color:#9b59b6">●</span> Water Meter')
     if any(parse_any(v(row,f'Kharif 25 PVC Pipe location / {i}')) for i in[1,2,3,4,5]):
-        parts.append('<span style="color:#f85149">●</span> PVC Pipe')
+        parts.append('<span style="color:#f85149">🪧</span> PVC Pipe')
     if parts:
         st.markdown(f'<div style="background:#161b22;border:1px solid #21262d;border-radius:8px;padding:8px 14px;font-size:0.8rem;color:#8b949e;margin-top:6px">{"&nbsp;&nbsp;".join(parts)}</div>', unsafe_allow_html=True)
 
-    if polygon_coords or tubewell_coord:
-        rows = [kv_row("Center", f"{clat:.5f}°N, {clon:.5f}°E")]
-        if tubewell_coord:
-            rows.append(kv_row("Tubewell", f"{tubewell_coord[0]:.5f}°N, {tubewell_coord[1]:.5f}°E"))
-        nav_link = (f'<a href="https://www.google.com/maps/dir/?api=1&destination={clat},{clon}" '
-                    f'target="_blank" style="background:#238636;color:#fff;padding:6px 14px;border-radius:6px;'
-                    f'text-decoration:none;font-size:0.82rem;font-weight:600;display:inline-block;margin-top:8px">'
-                    f'🧭 Open in Google Maps</a>')
-        st.markdown(f'<div class="card" style="margin-top:8px"><div class="card-title">Coordinates &amp; Navigation</div>{"".join(rows)}{nav_link}</div>', unsafe_allow_html=True)
+    rows_c = [kv_row("Center", f"{clat:.5f}°N, {clon:.5f}°E")]
+    nav_link = (f'<a href="https://www.google.com/maps/dir/?api=1&destination={clat},{clon}" '
+                f'target="_blank" style="background:#238636;color:#fff;padding:6px 14px;border-radius:6px;'
+                f'text-decoration:none;font-size:0.82rem;font-weight:600;display:inline-block;margin-top:8px">'
+                f'🧭 Open in Google Maps</a>')
+    st.markdown(f'<div class="card" style="margin-top:8px"><div class="card-title">Coordinates &amp; Navigation</div>{"".join(rows_c)}{nav_link}</div>', unsafe_allow_html=True)
 
 st.markdown(f'<hr style="border-color:#21262d;margin:20px 0"><p style="color:#484f58;font-size:0.76rem;text-align:center">🌍 Digital Village Project &nbsp;·&nbsp; Tel Aviv University &amp; Thapar University, Patiala &nbsp;·&nbsp; Research Lead: Dan Uriel Etgar &nbsp;·&nbsp; Dashboard: Satyam Yadav &nbsp;·&nbsp; {len(df)} farms</p>', unsafe_allow_html=True)
