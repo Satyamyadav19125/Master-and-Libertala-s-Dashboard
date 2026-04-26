@@ -47,15 +47,28 @@ section.main > div { padding-top: 1rem; }
 
 @st.cache_data(ttl=300, show_spinner="🌾 Loading farm data from Google Sheets…")
 def load_data():
-    # ── Farm Master — "Farm details" sheet (gid=0) ───────────────────────────
-    # Reads only columns BN:DQ (cols 65-120). BN = Kharif 25 Farm ID.
-    FARM_ID  = "10_bnGF7WBZ0J3aSvl8riufNbZjXAxB7wcnN3545fGzw"
-    FARM_GID = "0"   # Farm details sheet gid
-    farm_url = f"https://docs.google.com/spreadsheets/d/{FARM_ID}/export?format=csv&gid={FARM_GID}"
+    import requests
+    from io import StringIO
 
-    df_full = pd.read_csv(farm_url, dtype=str, keep_default_na=False, header=0)
+    def fetch_sheet(sheet_id, sheet_name):
+        # Try gviz first, then export as fallback
+        urls = [
+            f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={requests.utils.quote(sheet_name)}",
+            f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&sheet={requests.utils.quote(sheet_name)}",
+        ]
+        headers = {"User-Agent": "Mozilla/5.0"}
+        for url in urls:
+            try:
+                r = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
+                if r.status_code == 200 and len(r.text) > 100:
+                    return pd.read_csv(StringIO(r.text), dtype=str, keep_default_na=False)
+            except Exception:
+                continue
+        raise Exception(f"Could not fetch sheet '{sheet_name}' from {sheet_id}")
+
+    # ── Farm Master — "Farm details" sheet ───────────────────────────────────
+    df_full = fetch_sheet("10_bnGF7WBZ0J3aSvl8riufNbZjXAxB7wcnN3545fGzw", "Farm details")
     df_full.columns = [str(c).strip() for c in df_full.columns]
-    # BN:DQ = cols 65-120 (0-indexed)
     df_k = df_full.iloc[:, 65:121].copy()
     df_k.columns = [str(c).strip() for c in df_k.columns]
     df_k.rename(columns={'Kharif 25 Farm ID': 'Farm ID'}, inplace=True)
@@ -63,13 +76,7 @@ def load_data():
     df_k = df_k[df_k['Farm ID'].notna() & (df_k['Farm ID'] != '')]
 
     # ── Libertalia — "master_control" sheet ──────────────────────────────────
-    LIB_ID  = "14ah-7Ah690oeOXE5vT8p701LYv7PiEMx_xZycNOOrSA"
-    LIB_GID = "master_control"
-
-    # First get the sheet GID by reading sheet metadata via export
-    # We'll use the sheet name approach — export by sheet name
-    lib_url = f"https://docs.google.com/spreadsheets/d/{LIB_ID}/gviz/tq?tqx=out:csv&sheet=master_control"
-    df_lib = pd.read_csv(lib_url, dtype=str, keep_default_na=False, header=0)
+    df_lib = fetch_sheet("14ah-7Ah690oeOXE5vT8p701LYv7PiEMx_xZycNOOrSA", "master_control")
     df_lib.columns = [str(c).strip() for c in df_lib.columns]
     df_lib = df_lib[['Plot code', 'polygons', 'tw location']].copy()
     df_lib.rename(columns={'Plot code': 'Farm ID'}, inplace=True)
