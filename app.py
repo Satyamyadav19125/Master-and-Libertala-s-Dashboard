@@ -8,9 +8,18 @@ st.set_page_config(page_title="Digital Village · Farm Intelligence", layout="wi
 
 st.markdown("""
 <style>
-[data-testid="stAppViewContainer"] { background: #0f1117; }
+/* Force dark theme regardless of system preference */
+html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {
+    background: #0f1117 !important; color: #e6edf3 !important;
+}
 [data-testid="stSidebar"] { background: #161b22 !important; border-right: 1px solid #21262d; }
+[data-testid="stSidebar"] * { color: #e6edf3 !important; }
 section.main > div { padding-top: 1rem; }
+/* Hide Manage App button (#5) */
+[data-testid="manage-app-button"] { display: none !important; }
+.stDeployButton { display: none !important; }
+footer { display: none !important; }
+#MainMenu { display: none !important; }
 .proj-header { background:linear-gradient(135deg,#0d2137 0%,#0a3d1f 100%); border-radius:14px; padding:22px 28px; margin-bottom:18px; border:1px solid #1e4d2b; }
 .proj-header h1 { margin:0; font-size:1.6rem; color:#fff; font-weight:800; }
 .proj-header .sub { color:#7ec8a0; font-size:0.88rem; margin-top:4px; }
@@ -41,6 +50,11 @@ section.main > div { padding-top: 1rem; }
 .sec { font-size:0.78rem; color:#7ec8a0; text-transform:uppercase; letter-spacing:1px; font-weight:700; margin:14px 0 6px; display:flex; align-items:center; gap:6px; }
 .sec::after { content:''; flex:1; height:1px; background:#21262d; }
 .sb-proj { background:linear-gradient(135deg,#0d2137,#0a3d1f); border-radius:10px; padding:12px 14px; margin-bottom:12px; border:1px solid #1e4d2b; }
+/* Override Streamlit light mode elements */
+.stTextInput input, .stSelectbox select, div[data-baseweb="select"] {
+    background:#161b22 !important; color:#e6edf3 !important; border-color:#30363d !important;
+}
+p, label, .stMarkdown { color:#e6edf3 !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -83,9 +97,10 @@ def load_data():
     df_lib['Farm ID'] = df_lib['Farm ID'].str.strip()
 
     df = pd.merge(df_k, df_lib, on='Farm ID', how='inner')
-    return df
+    # Also return full kharif df (before merge) for equipment filters
+    return df, df_k
 
-df = load_data()
+df, df_all = load_data()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -146,7 +161,6 @@ def dkv_row(key, content, code=False):
 
 def has_active_meter(row): return any(v(row,f'Kharif 25 Meter active / {i} (Y/N)').upper() in('Y','YES','1') for i in[1,2])
 def has_meter(row):        return any(v(row,f'Kharif 25 Meter serial number / {i}') for i in[1,2])
-# #3: pipe counts only if location exists (farms without location go to "no pipe")
 def has_pipe(row):         return any(v(row,f'Kharif 25 PVC Pipe location / {i}') for i in[1,2,3,4,5])
 
 
@@ -183,8 +197,9 @@ with st.sidebar:
         "✅ Active meter","⛔ Inactive meter","🔧 Has PVC pipes","🪣 No PVC pipes",
     ], label_visibility="collapsed")
 
-    # Build pool from filter
+    # Build pool from filter — use df_all for equipment filters (full kharif data)
     all_records_list = df.to_dict('records')
+    all_kharif_list  = df_all.to_dict('records')
     fmap = {
         "💧 Has water meter":  lambda r: has_meter(r),
         "🚫 No water meter":   lambda r: not has_meter(r),
@@ -193,7 +208,15 @@ with st.sidebar:
         "🔧 Has PVC pipes":    lambda r: has_pipe(r),
         "🪣 No PVC pipes":     lambda r: not has_pipe(r),
     }
-    pool = [r for r in all_records_list if fmap[filter_opt](r)] if filter_opt in fmap else all_records_list
+    if filter_opt in fmap:
+        # Filter from full kharif list, then intersect with merged (map-capable) farms
+        # For "has" filters: show only farms that also have map data
+        # For "no" filters: show all matching farms from full list
+        is_negative = filter_opt in ("🚫 No water meter", "⛔ Inactive meter", "🪣 No PVC pipes")
+        source = all_kharif_list if is_negative else all_records_list
+        pool = [r for r in source if fmap[filter_opt](r)]
+    else:
+        pool = all_records_list
     pool_ids = sorted(set(r['Farm ID'] for r in pool))
 
     # Apply search on top of filter
@@ -345,26 +368,24 @@ with col1:
     else:
         st.markdown('<div class="dev-card" style="color:#8b949e;font-size:0.82rem">No meter installed</div>', unsafe_allow_html=True)
 
-    st.markdown('<div class="sec">🔧 PVC Pipes</div>', unsafe_allow_html=True)
-    pipe_mon = v(row,'Kharif 25 PVC Pipe monitoring (Y/N)')
-    st.markdown(f'<div style="margin-bottom:6px;font-size:0.82rem;color:#8b949e">Monitoring: {badge(pipe_mon)}</div>', unsafe_allow_html=True)
-    found_p = False
-    for i in [1,2,3,4,5]:
-        code  = v(row, f'Kharif 25 PVC Pipe code / {i}')
-        loc_p = v(row, f'Kharif 25 PVC Pipe location / {i}')
-        if code or loc_p:
-            found_p = True
-            # #2: include farmer info in each pipe card
-            drows = [
-                dkv_row("Farm",    v(row,'Farm ID'),  code=True),
-                dkv_row("Farmer",  farmer_name),
-                dkv_row("Phone",   farmer_phone),
-            ]
-            if code:  drows.append(dkv_row("Code",     code,  code=True))
-            if loc_p: drows.append(dkv_row("Location", loc_p, code=True))
-            st.markdown(f'<div class="dev-card"><div class="dev-title">🔧 Pipe {i}</div>{"".join(drows)}</div>', unsafe_allow_html=True)
-    if not found_p:
-        st.markdown('<div class="dev-card" style="color:#8b949e;font-size:0.82rem">No pipes installed</div>', unsafe_allow_html=True)
+    # #4: Only show pipes section if at least one pipe has a location
+    any_pipe_loc = any(v(row,f'Kharif 25 PVC Pipe location / {i}') for i in[1,2,3,4,5])
+    if any_pipe_loc:
+        st.markdown('<div class="sec">🔧 PVC Pipes</div>', unsafe_allow_html=True)
+        pipe_mon = v(row,'Kharif 25 PVC Pipe monitoring (Y/N)')
+        st.markdown(f'<div style="margin-bottom:6px;font-size:0.82rem;color:#8b949e">Monitoring: {badge(pipe_mon)}</div>', unsafe_allow_html=True)
+        for i in [1,2,3,4,5]:
+            code  = v(row, f'Kharif 25 PVC Pipe code / {i}')
+            loc_p = v(row, f'Kharif 25 PVC Pipe location / {i}')
+            if loc_p:  # only show if has location
+                drows = [
+                    dkv_row("Farm",    v(row,'Farm ID'),  code=True),
+                    dkv_row("Farmer",  farmer_name),
+                    dkv_row("Phone",   farmer_phone),
+                ]
+                if code:  drows.append(dkv_row("Code",     code,  code=True))
+                drows.append(dkv_row("Location", loc_p, code=True))
+                st.markdown(f'<div class="dev-card"><div class="dev-title">🔧 Pipe {i}</div>{"".join(drows)}</div>', unsafe_allow_html=True)
 
 
 # ── MAP ───────────────────────────────────────────────────────────────────────
@@ -376,30 +397,32 @@ with col2:
     polygon_coords = parse_polygon(polygon_raw) if polygon_raw not in('','nan','None') else []
     tubewell_coord = parse_any(tubewell_raw)    if tubewell_raw not in('','nan','None') else None
 
-    # #1 & #3: collect meter locations — use these ON MAP instead of tubewell
+    # #1 & #3: collect meter locations
     meter_locations = {}
     for i in [1,2]:
         mloc = v(row,f'Kharif 25 Meter location / {i}')
         mser = v(row,f'Kharif 25 Meter serial number / {i}')
-        if mloc and mser:
-            mc = parse_any(mloc)
-            if mc:
-                meter_locations[i] = {'coord': mc, 'serial': mser,
-                                       'active': v(row,f'Kharif 25 Meter active / {i} (Y/N)')}
+        mact = v(row,f'Kharif 25 Meter active / {i} (Y/N)')
+        if mser:  # show meter even if location parse fails
+            mc = parse_any(mloc) if mloc else None
+            meter_locations[i] = {'coord': mc, 'serial': mser, 'active': mact, 'loc_raw': mloc}
 
-    # Map center: polygon > first meter > tubewell
+    # meters that have parseable coordinates
+    mappable_meters = {i: d for i, d in meter_locations.items() if d['coord']}
+
+    # Map center: polygon > first mappable meter > tubewell
     if polygon_coords:
         clat = sum(c[0] for c in polygon_coords)/len(polygon_coords)
         clon = sum(c[1] for c in polygon_coords)/len(polygon_coords)
-    elif meter_locations:
-        clat,clon = list(meter_locations.values())[0]['coord']
+    elif mappable_meters:
+        clat,clon = list(mappable_meters.values())[0]['coord']
     elif tubewell_coord:
         clat,clon = tubewell_coord
     else:
         clat,clon = 30.41,76.42
 
     # #4: no location data at all
-    if not polygon_coords and not tubewell_coord and not meter_locations:
+    if not polygon_coords and not tubewell_coord and not mappable_meters:
         st.markdown("""
         <div style="background:#161b22;border:1px solid #30363d;border-radius:12px;
              padding:40px 24px;text-align:center;margin-top:10px">
@@ -470,14 +493,14 @@ with col2:
         rh += popup_row("Meter(s)", f'<span style="color:#3fb950;font-weight:600">{", ".join(d["serial"] for d in meter_locations.values()) or "—"}</span>')
         rh += popup_row("Lat", f"{tubewell_coord[0]:.6f}°N")
         rh += popup_row("Lon", f"{tubewell_coord[1]:.6f}°E")
-        # #1: only show tubewell pin if NO meter installed
-        if not meter_locations:
+        # only show tubewell pin if NO mappable meters
+        if not mappable_meters:
             folium.Marker(location=tubewell_coord, tooltip="💧 Tubewell (no meter)",
                 popup=make_popup('#0d2137','💧 Tubewell',rh,*tubewell_coord),
                 icon=folium.Icon(color='blue',icon='tint',prefix='fa')).add_to(m)
 
-    # #1 & #3: show BOTH meters at their own locations (purple pins)
-    for i, mdata in meter_locations.items():
+    # show ALL meters that have parseable coords (purple pins)
+    for i, mdata in mappable_meters.items():
         mc   = mdata['coord']
         mser = mdata['serial']
         mact = mdata['active']
@@ -519,9 +542,9 @@ with col2:
 
     # Dynamic legend
     parts = ['<span style="color:#3fb950">■</span> Farm Polygon'] if polygon_coords else []
-    if tubewell_coord and not meter_locations:
+    if tubewell_coord and not mappable_meters:
         parts.append('<span style="color:#58a6ff">●</span> Tubewell')
-    if meter_locations:
+    if mappable_meters:
         parts.append('<span style="color:#9b59b6">●</span> Water Meter')
     if any(parse_any(v(row,f'Kharif 25 PVC Pipe location / {i}')) for i in[1,2,3,4,5]):
         parts.append('<span style="color:#f85149">🪧</span> PVC Pipe')
