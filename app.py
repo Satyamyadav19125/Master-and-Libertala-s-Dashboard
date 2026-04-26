@@ -178,9 +178,9 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-    # #5: Small refresh button in sidebar header area
-    col_r1, col_r2 = st.columns([3,1])
-    with col_r2:
+    # #2: Small refresh button on LEFT side
+    col_r1, col_r2 = st.columns([1, 3])
+    with col_r1:
         if st.button("🔄", help="Reload data from Google Sheets", key="reload_btn"):
             st.cache_data.clear()
             st.rerun()
@@ -240,7 +240,21 @@ with st.sidebar:
 if not selected_id:
     st.info("No farms found."); st.stop()
 
-row = df[df['Farm ID'] == selected_id].iloc[0].to_dict()
+# Farm may be in df_all but not in df (no map data) — handle gracefully
+df_match = df[df['Farm ID'] == selected_id]
+if len(df_match) > 0:
+    row = df_match.iloc[0].to_dict()
+    has_map_data = True
+else:
+    # Farm exists in kharif data but no Libertalia match
+    df_all_match = df_all[df_all['Farm ID'] == selected_id]
+    if len(df_all_match) > 0:
+        row = df_all_match.iloc[0].to_dict()
+        row['polygons'] = ''
+        row['tw location'] = ''
+    else:
+        st.warning("Farm not found in dataset."); st.stop()
+    has_map_data = False
 
 farmer_name  = v(row, 'Kharif 25 Farmer Name')
 farmer_phone = v(row, 'Kharif 25 Farmer Phone Number')
@@ -397,13 +411,41 @@ with col2:
     polygon_coords = parse_polygon(polygon_raw) if polygon_raw not in('','nan','None') else []
     tubewell_coord = parse_any(tubewell_raw)    if tubewell_raw not in('','nan','None') else None
 
+    # #3: Snap a point inside the polygon (nearest point on polygon boundary, moved inward)
+    def snap_inside_polygon(pt, poly, inset=0.00003):
+        """If pt is outside polygon, find nearest polygon edge point and move slightly inward."""
+        if not poly or not pt: return pt
+        lat, lon = pt
+        # Find nearest polygon vertex
+        best = min(poly, key=lambda p: (p[0]-lat)**2 + (p[1]-lon)**2)
+        # Move slightly toward polygon center
+        clat_p = sum(p[0] for p in poly)/len(poly)
+        clon_p = sum(p[1] for p in poly)/len(poly)
+        snapped_lat = best[0] + (clat_p - best[0]) * 0.15
+        snapped_lon = best[1] + (clon_p - best[1]) * 0.15
+        return (snapped_lat, snapped_lon)
+
+    def point_in_polygon(pt, poly):
+        """Ray casting algorithm to check if point is inside polygon."""
+        if not poly or not pt: return False
+        lat, lon = pt
+        n = len(poly)
+        inside = False
+        j = n - 1
+        for i in range(n):
+            xi, yi = poly[i]; xj, yj = poly[j]
+            if ((yi > lon) != (yj > lon)) and (lat < (xj - xi) * (lon - yi) / (yj - yi + 1e-10) + xi):
+                inside = not inside
+            j = i
+        return inside
+
     # #1 & #3: collect meter locations
     meter_locations = {}
     for i in [1,2]:
         mloc = v(row,f'Kharif 25 Meter location / {i}')
         mser = v(row,f'Kharif 25 Meter serial number / {i}')
         mact = v(row,f'Kharif 25 Meter active / {i} (Y/N)')
-        if mser:  # show meter even if location parse fails
+        if mser:
             mc = parse_any(mloc) if mloc else None
             meter_locations[i] = {'coord': mc, 'serial': mser, 'active': mact, 'loc_raw': mloc}
 
@@ -499,33 +541,37 @@ with col2:
                 popup=make_popup('#0d2137','💧 Tubewell',rh,*tubewell_coord),
                 icon=folium.Icon(color='blue',icon='tint',prefix='fa')).add_to(m)
 
-    # show ALL meters that have parseable coords (purple pins)
+    # show ALL meters that have parseable coords (purple pins) — #4 fix
     for i, mdata in mappable_meters.items():
         mc   = mdata['coord']
         mser = mdata['serial']
         mact = mdata['active']
+        # snap meter inside polygon if outside
+        mc_display = snap_inside_polygon(mc, polygon_coords) if polygon_coords and not point_in_polygon(mc, polygon_coords) else mc
         rh  = popup_row("Serial", f'<b>{mser}</b>')
         rh += popup_row("Active", mact)
         rh += popup_row("Farmer", farmer_name)
         rh += popup_row("Phone",  farmer_phone)
         rh += popup_row("Lat", f"{mc[0]:.6f}°N")
         rh += popup_row("Lon", f"{mc[1]:.6f}°E")
-        folium.Marker(location=mc, tooltip=f"🟣 Meter {i}: {mser}",
-            popup=make_popup('#4a0080',f'🟣 Water Meter {i}',rh,*mc,mw=260),
+        folium.Marker(location=mc_display, tooltip=f"🟣 Meter {i}: {mser}",
+            popup=make_popup('#4a0080',f'🟣 Water Meter {i}',rh,*mc_display,mw=260),
             icon=folium.Icon(color='purple',icon='tint',prefix='fa')).add_to(m)
 
-    # #2: PVC Pipes — custom pipe emoji icon
+    # PVC Pipes — #3: snap inside polygon if outside
     for i in [1,2,3,4,5]:
         ploc  = v(row,f'Kharif 25 PVC Pipe location / {i}')
         pcode = v(row,f'Kharif 25 PVC Pipe code / {i}')
         if ploc:
             pc = parse_any(ploc)
             if pc:
+                # snap pipe inside polygon if it's outside
+                pc_display = snap_inside_polygon(pc, polygon_coords) if polygon_coords and not point_in_polygon(pc, polygon_coords) else pc
                 rh  = popup_row("Code",   f'<b>{pcode}</b>')
                 rh += popup_row("Farmer", farmer_name)
                 rh += popup_row("Phone",  farmer_phone)
-                rh += popup_row("Lat",    f"{pc[0]:.6f}°N")
-                rh += popup_row("Lon",    f"{pc[1]:.6f}°E")
+                rh += popup_row("Orig Lat", f"{pc[0]:.6f}°N")
+                rh += popup_row("Orig Lon", f"{pc[1]:.6f}°E")
                 pipe_icon = folium.DivIcon(
                     html=('<div style="background:#c0392b;color:white;border-radius:50%;'
                           'width:26px;height:26px;display:flex;align-items:center;'
@@ -533,8 +579,8 @@ with col2:
                           'box-shadow:0 2px 4px rgba(0,0,0,0.5)">🪧</div>'),
                     icon_size=(26,26), icon_anchor=(13,13)
                 )
-                folium.Marker(location=pc, tooltip=f"🔴 Pipe {i}: {pcode}",
-                    popup=make_popup('#7b0000',f'🔴 PVC Pipe {i}',rh,*pc,mw=230),
+                folium.Marker(location=pc_display, tooltip=f"🔴 Pipe {i}: {pcode}",
+                    popup=make_popup('#7b0000',f'🔴 PVC Pipe {i}',rh,*pc_display,mw=230),
                     icon=pipe_icon).add_to(m)
 
     folium.LayerControl().add_to(m)
