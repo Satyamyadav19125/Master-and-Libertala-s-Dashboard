@@ -197,7 +197,7 @@ with st.sidebar:
         "✅ Active meter","⛔ Inactive meter","🔧 Has PVC pipes","🪣 No PVC pipes",
     ], label_visibility="collapsed")
 
-    # Build pool from filter — use df_all for equipment filters (full kharif data)
+    # Build pool from filter — always use full kharif list (df_all) as source
     all_records_list = df.to_dict('records')
     all_kharif_list  = df_all.to_dict('records')
     fmap = {
@@ -208,15 +208,11 @@ with st.sidebar:
         "🔧 Has PVC pipes":    lambda r: has_pipe(r),
         "🪣 No PVC pipes":     lambda r: not has_pipe(r),
     }
+    # Use full kharif list for ALL filters so no farms are missed
     if filter_opt in fmap:
-        # Filter from full kharif list, then intersect with merged (map-capable) farms
-        # For "has" filters: show only farms that also have map data
-        # For "no" filters: show all matching farms from full list
-        is_negative = filter_opt in ("🚫 No water meter", "⛔ Inactive meter", "🪣 No PVC pipes")
-        source = all_kharif_list if is_negative else all_records_list
-        pool = [r for r in source if fmap[filter_opt](r)]
+        pool = [r for r in all_kharif_list if fmap[filter_opt](r)]
     else:
-        pool = all_records_list
+        pool = all_kharif_list
     pool_ids = sorted(set(r['Farm ID'] for r in pool))
 
     # Apply search on top of filter
@@ -261,23 +257,24 @@ farmer_phone = v(row, 'Kharif 25 Farmer Phone Number')
 village      = v(row, 'Kharif 25 Village')
 block        = v(row, 'Kharif 25 Block')
 
-# ── Stats — chips reflect current filter (#2) ─────────────────────────────────
-all_records = df.to_dict('records')
-total_farms = len(df)
+# ── Stats — chips reflect current filter ─────────────────────────────────────
+all_records  = df.to_dict('records')
+all_kharif   = df_all.to_dict('records')  # full list for accurate counts
+total_farms  = len(df_all)  # show total from full dataset
 
-# Pre-compute all counts once
-c_all        = len(all_records)
-c_villages   = df['Kharif 25 Village'].nunique()
-c_blocks     = df['Kharif 25 Block'].nunique()
-c_meter      = sum(1 for r in all_records if has_meter(r))
-c_no_meter   = sum(1 for r in all_records if not has_meter(r))
-c_active     = sum(1 for r in all_records if has_active_meter(r))
-c_inactive   = sum(1 for r in all_records if has_meter(r) and not has_active_meter(r))
-c_pipe       = sum(1 for r in all_records if has_pipe(r))
-c_no_pipe    = sum(1 for r in all_records if not has_pipe(r))
+# Pre-compute all counts from FULL kharif data
+c_all      = len(all_kharif)
+c_villages = df_all['Kharif 25 Village'].nunique()
+c_blocks   = df_all['Kharif 25 Block'].nunique()
+c_meter    = sum(1 for r in all_kharif if has_meter(r))
+c_no_meter = sum(1 for r in all_kharif if not has_meter(r))
+c_active   = sum(1 for r in all_kharif if has_active_meter(r))
+c_inactive = sum(1 for r in all_kharif if has_meter(r) and not has_active_meter(r))
+c_pipe     = sum(1 for r in all_kharif if has_pipe(r))
+c_no_pipe  = sum(1 for r in all_kharif if not has_pipe(r))
 
-# Per-filter: villages and blocks from the filtered pool
-pool_df      = df[df['Farm ID'].isin(pool_ids)]
+# Villages/blocks within current filter pool
+pool_df       = df_all[df_all['Farm ID'].isin(pool_ids)]
 pool_villages = pool_df['Kharif 25 Village'].nunique()
 pool_blocks   = pool_df['Kharif 25 Block'].nunique()
 
