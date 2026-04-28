@@ -8,14 +8,12 @@ st.set_page_config(page_title="Digital Village · Farm Intelligence", layout="wi
 
 st.markdown("""
 <style>
-/* Force dark theme regardless of system preference */
 html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {
     background: #0f1117 !important; color: #e6edf3 !important;
 }
 [data-testid="stSidebar"] { background: #161b22 !important; border-right: 1px solid #21262d; }
 [data-testid="stSidebar"] * { color: #e6edf3 !important; }
 section.main > div { padding-top: 1rem; }
-/* Hide Manage App button (#5) */
 [data-testid="manage-app-button"] { display: none !important; }
 .stDeployButton { display: none !important; }
 footer { display: none !important; }
@@ -50,57 +48,158 @@ footer { display: none !important; }
 .sec { font-size:0.78rem; color:#7ec8a0; text-transform:uppercase; letter-spacing:1px; font-weight:700; margin:14px 0 6px; display:flex; align-items:center; gap:6px; }
 .sec::after { content:''; flex:1; height:1px; background:#21262d; }
 .sb-proj { background:linear-gradient(135deg,#0d2137,#0a3d1f); border-radius:10px; padding:12px 14px; margin-bottom:12px; border:1px solid #1e4d2b; }
-/* Override Streamlit light mode elements */
 .stTextInput input, .stSelectbox select, div[data-baseweb="select"] {
     background:#161b22 !important; color:#e6edf3 !important; border-color:#30363d !important;
 }
 p, label, .stMarkdown { color:#e6edf3 !important; }
+.error-box { background:#3a1a1a; border:1px solid #b22222; border-radius:10px; padding:14px 18px; margin:10px 0; color:#f85149; font-size:0.85rem; }
 </style>
 """, unsafe_allow_html=True)
 
 
-@st.cache_data(ttl=300, show_spinner="🌾 Loading farm data from Google Sheets…")
+# ── Published Google Sheets CSV URLs ─────────────────────────────────────────
+# IMPORTANT: These use /pub?output=csv — the only method that works without auth.
+# If data goes blank again, verify these sheets are still "Published to web" in
+# Google Sheets → File → Share → Publish to web.
+
+# Farm Master — "Farm details" tab
+FARM_MASTER_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "10_bnGF7WBZ0J3aSvl8riufNbZjXAxB7wcnN3545fGzw"
+    "/pub?output=csv&gid=0"
+)
+
+# Libertalia — "master_control" tab (GID 2142859508)
+LIBERTALIA_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "14ah-7Ah690oeOXE5vT8p701LYv7PiEMx_xZycNOOrSA"
+    "/pub?output=csv&gid=2142859508"
+)
+
+
+@st.cache_data(ttl=60, show_spinner="🌾 Loading farm data…")
 def load_data():
+    """
+    Load and merge farm master + Libertalia data.
+    Uses published /pub?output=csv URLs — no auth required.
+    TTL=60s so the dashboard refreshes every minute automatically.
+    """
     import requests
     from io import StringIO
 
-    def fetch_sheet(sheet_id, sheet_name):
-        # Try gviz first, then export as fallback
-        urls = [
-            f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={requests.utils.quote(sheet_name)}",
-            f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&sheet={requests.utils.quote(sheet_name)}",
-        ]
-        headers = {"User-Agent": "Mozilla/5.0"}
-        for url in urls:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; FarmDashboard/1.0)",
+        "Accept": "text/csv,text/plain,*/*",
+    }
+
+    def fetch_csv(url, label):
+        """Fetch a published Google Sheet as CSV with retry logic."""
+        for attempt in range(3):
             try:
                 r = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
-                if r.status_code == 200 and len(r.text) > 100:
-                    return pd.read_csv(StringIO(r.text), dtype=str, keep_default_na=False)
-            except Exception:
-                continue
-        raise Exception(f"Could not fetch sheet '{sheet_name}' from {sheet_id}")
+                if r.status_code == 200 and len(r.text) > 200:
+                    df = pd.read_csv(StringIO(r.text), dtype=str, keep_default_na=False)
+                    df.columns = [str(c).strip() for c in df.columns]
+                    return df
+                else:
+                    st.warning(f"⚠️ {label}: HTTP {r.status_code} on attempt {attempt+1}")
+            except Exception as e:
+                if attempt == 2:
+                    raise Exception(f"Failed to fetch {label} after 3 attempts: {e}")
+        raise Exception(f"Could not load {label} — check that the sheet is published to web.")
 
-    # ── Farm Master — "Farm details" sheet ───────────────────────────────────
-    df_full = fetch_sheet("10_bnGF7WBZ0J3aSvl8riufNbZjXAxB7wcnN3545fGzw", "Farm details")
-    df_full.columns = [str(c).strip() for c in df_full.columns]
+    # ── Farm Master ───────────────────────────────────────────────────────────
+    df_full = fetch_csv(FARM_MASTER_URL, "Farm Master")
+
+    # Kharif 25 data lives in columns 65–120 (0-indexed)
+    # Column 65 should be "Kharif 25 Farm ID"
+    if df_full.shape[1] < 66:
+        raise Exception(
+            f"Farm Master sheet has only {df_full.shape[1]} columns — expected 120+. "
+            "Check the published URL points to the correct tab (Farm details)."
+        )
+
     df_k = df_full.iloc[:, 65:121].copy()
     df_k.columns = [str(c).strip() for c in df_k.columns]
-    df_k.rename(columns={'Kharif 25 Farm ID': 'Farm ID'}, inplace=True)
-    df_k['Farm ID'] = df_k['Farm ID'].str.strip()
-    df_k = df_k[df_k['Farm ID'].notna() & (df_k['Farm ID'] != '')]
 
-    # ── Libertalia — "master_control" sheet ──────────────────────────────────
-    df_lib = fetch_sheet("14ah-7Ah690oeOXE5vT8p701LYv7PiEMx_xZycNOOrSA", "master_control")
-    df_lib.columns = [str(c).strip() for c in df_lib.columns]
-    df_lib = df_lib[['Plot code', 'polygons', 'tw location']].copy()
-    df_lib.rename(columns={'Plot code': 'Farm ID'}, inplace=True)
-    df_lib['Farm ID'] = df_lib['Farm ID'].str.strip()
+    # Rename the Farm ID column — handle both possible names
+    for candidate in ['Kharif 25 Farm ID', df_k.columns[0]]:
+        if candidate in df_k.columns:
+            df_k.rename(columns={candidate: 'Farm ID'}, inplace=True)
+            break
 
-    df = pd.merge(df_k, df_lib, on='Farm ID', how='inner')
-    # Also return full kharif df (before merge) for equipment filters
-    return df, df_k
+    df_k['Farm ID'] = df_k['Farm ID'].astype(str).str.strip()
+    df_k = df_k[df_k['Farm ID'].notna() & (df_k['Farm ID'] != '') & (df_k['Farm ID'] != 'nan')]
 
-df, df_all = load_data()
+    if df_k.empty:
+        raise Exception(
+            "Farm Master loaded but no Farm IDs found in columns 65–120. "
+            "The sheet structure may have changed — check column positions."
+        )
+
+    # ── Libertalia ────────────────────────────────────────────────────────────
+    df_lib = fetch_csv(LIBERTALIA_URL, "Libertalia master_control")
+
+    # Need: Plot code (→ Farm ID), polygons, tw location
+    # Column names may vary; try to find them flexibly
+    col_map = {}
+    for col in df_lib.columns:
+        cl = col.lower().strip()
+        if 'plot' in cl and 'code' in cl:
+            col_map['Farm ID'] = col
+        elif 'polygon' in cl:
+            col_map['polygons'] = col
+        elif 'tw' in cl and 'location' in cl:
+            col_map['tw location'] = col
+        elif cl in ('polygons', 'tw location', 'plot code'):
+            col_map[cl] = col
+
+    missing = [k for k in ['Farm ID', 'polygons', 'tw location'] if k not in col_map]
+    if missing:
+        # Fallback: use positional columns if headers are off
+        # master_control typically: col0=Plot code, ...col AB/AC = polygons/tw location
+        # Try exact names first
+        exact = {'Plot code': 'Farm ID', 'polygons': 'polygons', 'tw location': 'tw location'}
+        for src, dst in exact.items():
+            if src in df_lib.columns:
+                col_map[dst] = src
+        missing = [k for k in ['Farm ID', 'polygons', 'tw location'] if k not in col_map]
+        if missing:
+            raise Exception(
+                f"Libertalia sheet missing columns: {missing}. "
+                f"Available columns: {list(df_lib.columns[:20])}..."
+            )
+
+    df_lib = df_lib[[col_map['Farm ID'], col_map['polygons'], col_map['tw location']]].copy()
+    df_lib.columns = ['Farm ID', 'polygons', 'tw location']
+    df_lib['Farm ID'] = df_lib['Farm ID'].astype(str).str.strip()
+    df_lib = df_lib[df_lib['Farm ID'].notna() & (df_lib['Farm ID'] != '') & (df_lib['Farm ID'] != 'nan')]
+
+    # ── Merge ─────────────────────────────────────────────────────────────────
+    df_merged = pd.merge(df_k, df_lib, on='Farm ID', how='inner')
+
+    return df_merged, df_k
+
+
+# ── Load with error display ───────────────────────────────────────────────────
+try:
+    df, df_all = load_data()
+    if df.empty:
+        st.error("⚠️ Data loaded but merge produced 0 rows. Farm IDs may not match between sheets.")
+        st.stop()
+except Exception as e:
+    st.markdown(f"""
+    <div class="error-box">
+      <b>❌ Failed to load data from Google Sheets</b><br><br>
+      <b>Error:</b> {e}<br><br>
+      <b>Most likely fix:</b><br>
+      1. Open each Google Sheet<br>
+      2. Go to <b>File → Share → Publish to web</b><br>
+      3. Make sure the sheet is published (not just shared)<br>
+      4. Click the 🔄 Reload button in the sidebar
+    </div>
+    """, unsafe_allow_html=True)
+    st.stop()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -178,28 +277,26 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-    # #2: Small refresh button on LEFT side
     col_r1, col_r2 = st.columns([1, 3])
     with col_r1:
         if st.button("🔄", help="Reload data from Google Sheets", key="reload_btn"):
             st.cache_data.clear()
             st.rerun()
 
-    # ── #1: Search & Select FIRST ─────────────────────────────────────────────
+    # Show last-loaded info
+    st.caption(f"✅ {len(df_all)} farms loaded · Auto-refreshes every 60s")
+
     st.markdown("#### 🔍 Find a Farm")
     search = st.text_input("Search farm", placeholder="ID, number, name, village…", label_visibility="collapsed")
 
     st.markdown("---")
-    # ── Filter BELOW search ───────────────────────────────────────────────────
     st.markdown("#### ⚙️ Filter by Equipment")
     filter_opt = st.radio("Filter options", [
         "🌾 All farms","💧 Has water meter","🚫 No water meter",
         "✅ Active meter","⛔ Inactive meter","🔧 Has PVC pipes","🪣 No PVC pipes",
     ], label_visibility="collapsed")
 
-    # Build pool from filter — always use full kharif list (df_all) as source
-    all_records_list = df.to_dict('records')
-    all_kharif_list  = df_all.to_dict('records')
+    all_kharif_list = df_all.to_dict('records')
     fmap = {
         "💧 Has water meter":  lambda r: has_meter(r),
         "🚫 No water meter":   lambda r: not has_meter(r),
@@ -208,14 +305,9 @@ with st.sidebar:
         "🔧 Has PVC pipes":    lambda r: has_pipe(r),
         "🪣 No PVC pipes":     lambda r: not has_pipe(r),
     }
-    # Use full kharif list for ALL filters so no farms are missed
-    if filter_opt in fmap:
-        pool = [r for r in all_kharif_list if fmap[filter_opt](r)]
-    else:
-        pool = all_kharif_list
+    pool = [r for r in all_kharif_list if fmap[filter_opt](r)] if filter_opt in fmap else all_kharif_list
     pool_ids = sorted(set(r['Farm ID'] for r in pool))
 
-    # Apply search on top of filter
     if search:
         q = search.strip().upper()
         id_m   = [i for i in pool_ids if q in i.upper()]
@@ -225,7 +317,7 @@ with st.sidebar:
     else:
         filtered_ids = pool_ids
 
-    st.caption(f"**{len(filtered_ids)}** farms")
+    st.caption(f"**{len(filtered_ids)}** farms match")
 
     if not filtered_ids:
         st.warning("No farms match."); st.stop()
@@ -236,13 +328,12 @@ with st.sidebar:
 if not selected_id:
     st.info("No farms found."); st.stop()
 
-# Farm may be in df_all but not in df (no map data) — handle gracefully
+# Farm may be in df_all but not in df (no map data)
 df_match = df[df['Farm ID'] == selected_id]
 if len(df_match) > 0:
     row = df_match.iloc[0].to_dict()
     has_map_data = True
 else:
-    # Farm exists in kharif data but no Libertalia match
     df_all_match = df_all[df_all['Farm ID'] == selected_id]
     if len(df_all_match) > 0:
         row = df_all_match.iloc[0].to_dict()
@@ -257,15 +348,11 @@ farmer_phone = v(row, 'Kharif 25 Farmer Phone Number')
 village      = v(row, 'Kharif 25 Village')
 block        = v(row, 'Kharif 25 Block')
 
-# ── Stats — chips reflect current filter ─────────────────────────────────────
-all_records  = df.to_dict('records')
-all_kharif   = df_all.to_dict('records')  # full list for accurate counts
-total_farms  = len(df_all)  # show total from full dataset
-
-# Pre-compute all counts from FULL kharif data
+# ── Stats chips ───────────────────────────────────────────────────────────────
+all_kharif   = df_all.to_dict('records')
 c_all      = len(all_kharif)
-c_villages = df_all['Kharif 25 Village'].nunique()
-c_blocks   = df_all['Kharif 25 Block'].nunique()
+c_villages = df_all['Kharif 25 Village'].nunique() if 'Kharif 25 Village' in df_all.columns else 0
+c_blocks   = df_all['Kharif 25 Block'].nunique()   if 'Kharif 25 Block'   in df_all.columns else 0
 c_meter    = sum(1 for r in all_kharif if has_meter(r))
 c_no_meter = sum(1 for r in all_kharif if not has_meter(r))
 c_active   = sum(1 for r in all_kharif if has_active_meter(r))
@@ -273,12 +360,10 @@ c_inactive = sum(1 for r in all_kharif if has_meter(r) and not has_active_meter(
 c_pipe     = sum(1 for r in all_kharif if has_pipe(r))
 c_no_pipe  = sum(1 for r in all_kharif if not has_pipe(r))
 
-# Villages/blocks within current filter pool
 pool_df       = df_all[df_all['Farm ID'].isin(pool_ids)]
-pool_villages = pool_df['Kharif 25 Village'].nunique()
-pool_blocks   = pool_df['Kharif 25 Block'].nunique()
+pool_villages = pool_df['Kharif 25 Village'].nunique() if 'Kharif 25 Village' in pool_df.columns else 0
+pool_blocks   = pool_df['Kharif 25 Block'].nunique()   if 'Kharif 25 Block'   in pool_df.columns else 0
 
-# Each filter shows its own 4 chips: filtered farms, villages in filter, blocks in filter, key stat
 chip_configs = {
     "🌾 All farms":       (c_all,      c_villages,    c_blocks,    c_meter,    "With Meter"),
     "💧 Has water meter": (c_meter,    pool_villages, pool_blocks, c_active,   "Active Meter"),
@@ -291,7 +376,6 @@ chip_configs = {
 chip1, chip2, chip3, chip4_num, chip4_lbl = chip_configs.get(
     filter_opt, (c_all, c_villages, c_blocks, c_meter, "With Meter"))
 
-# Labels for chip 1
 chip1_labels = {
     "🌾 All farms":       "Total Farms",
     "💧 Has water meter": "With Meter",
@@ -303,7 +387,6 @@ chip1_labels = {
 }
 chip1_lbl = chip1_labels.get(filter_opt, "Total Farms")
 
-# #4: Fixed project title — never changes
 st.markdown(f"""
 <div class="proj-header">
   <h1>🌾 Digital Village Project</h1>
@@ -319,13 +402,13 @@ st.markdown(f"""
 <div class="farm-header">
   <div class="fid">Selected Farm</div>
   <h2>{v(row,'Farm ID')}</h2>
-  <div class="meta">👤 {farmer_name} &nbsp;·&nbsp; 📞 {farmer_phone} &nbsp;·&nbsp; 🏘️ {village}, {block}</div>
+  <div class="meta">👤 {farmer_name or '—'} &nbsp;·&nbsp; 📞 {farmer_phone or '—'} &nbsp;·&nbsp; 🏘️ {village or '—'}, {block or '—'}</div>
 </div>
 """, unsafe_allow_html=True)
 
 col1, col2 = st.columns([1.05, 1], gap="medium")
 
-# ── LEFT ─────────────────────────────────────────────────────────────────────
+# ── LEFT COLUMN ───────────────────────────────────────────────────────────────
 with col1:
 
     st.markdown('<div class="sec">📋 Farm Details</div>', unsafe_allow_html=True)
@@ -359,7 +442,6 @@ with col1:
     rows = [kv_row(k, badge(v(row,c))) for k,c in studies]
     st.markdown(f'<div class="card"><div class="card-title">Research Groups</div>{"".join(rows)}</div>', unsafe_allow_html=True)
 
-    # Meter section — only shown if farm has a meter (#1, #3)
     inst = clean_date(v(row,'Kharif 25 meter installation date'))
     rem  = clean_date(v(row,'Kharif 25 meter remove date'))
     if has_meter(row):
@@ -379,7 +461,6 @@ with col1:
     else:
         st.markdown('<div class="dev-card" style="color:#8b949e;font-size:0.82rem">No meter installed</div>', unsafe_allow_html=True)
 
-    # #4: Only show pipes section if at least one pipe has a location
     any_pipe_loc = any(v(row,f'Kharif 25 PVC Pipe location / {i}') for i in[1,2,3,4,5])
     if any_pipe_loc:
         st.markdown('<div class="sec">🔧 PVC Pipes</div>', unsafe_allow_html=True)
@@ -388,7 +469,7 @@ with col1:
         for i in [1,2,3,4,5]:
             code  = v(row, f'Kharif 25 PVC Pipe code / {i}')
             loc_p = v(row, f'Kharif 25 PVC Pipe location / {i}')
-            if loc_p:  # only show if has location
+            if loc_p:
                 drows = [
                     dkv_row("Farm",    v(row,'Farm ID'),  code=True),
                     dkv_row("Farmer",  farmer_name),
@@ -408,14 +489,10 @@ with col2:
     polygon_coords = parse_polygon(polygon_raw) if polygon_raw not in('','nan','None') else []
     tubewell_coord = parse_any(tubewell_raw)    if tubewell_raw not in('','nan','None') else None
 
-    # #3: Snap a point inside the polygon (nearest point on polygon boundary, moved inward)
     def snap_inside_polygon(pt, poly, inset=0.00003):
-        """If pt is outside polygon, find nearest polygon edge point and move slightly inward."""
         if not poly or not pt: return pt
         lat, lon = pt
-        # Find nearest polygon vertex
         best = min(poly, key=lambda p: (p[0]-lat)**2 + (p[1]-lon)**2)
-        # Move slightly toward polygon center
         clat_p = sum(p[0] for p in poly)/len(poly)
         clon_p = sum(p[1] for p in poly)/len(poly)
         snapped_lat = best[0] + (clat_p - best[0]) * 0.15
@@ -423,7 +500,6 @@ with col2:
         return (snapped_lat, snapped_lon)
 
     def point_in_polygon(pt, poly):
-        """Ray casting algorithm to check if point is inside polygon."""
         if not poly or not pt: return False
         lat, lon = pt
         n = len(poly)
@@ -436,7 +512,6 @@ with col2:
             j = i
         return inside
 
-    # #1 & #3: collect meter locations
     meter_locations = {}
     for i in [1,2]:
         mloc = v(row,f'Kharif 25 Meter location / {i}')
@@ -446,10 +521,8 @@ with col2:
             mc = parse_any(mloc) if mloc else None
             meter_locations[i] = {'coord': mc, 'serial': mser, 'active': mact, 'loc_raw': mloc}
 
-    # meters that have parseable coordinates
     mappable_meters = {i: d for i, d in meter_locations.items() if d['coord']}
 
-    # Map center: polygon > first mappable meter > tubewell
     if polygon_coords:
         clat = sum(c[0] for c in polygon_coords)/len(polygon_coords)
         clon = sum(c[1] for c in polygon_coords)/len(polygon_coords)
@@ -460,7 +533,6 @@ with col2:
     else:
         clat,clon = 30.41,76.42
 
-    # #4: no location data at all
     if not polygon_coords and not tubewell_coord and not mappable_meters:
         st.markdown("""
         <div style="background:#161b22;border:1px solid #30363d;border-radius:12px;
@@ -468,8 +540,7 @@ with col2:
           <div style="font-size:2.5rem;margin-bottom:12px">📭</div>
           <div style="color:#e6edf3;font-size:1.05rem;font-weight:600;margin-bottom:8px">Location Data Unavailable</div>
           <div style="color:#8b949e;font-size:0.84rem;line-height:1.6">
-            This farm record exists in the Farm Master sheet<br>
-            but has no matching location data in Libertalia.<br><br>
+            This farm exists in Farm Master but has no location data in Libertalia.<br><br>
             <span style="color:#58a6ff">Farm details above are still complete.</span>
           </div>
         </div>""", unsafe_allow_html=True)
@@ -532,18 +603,15 @@ with col2:
         rh += popup_row("Meter(s)", f'<span style="color:#3fb950;font-weight:600">{", ".join(d["serial"] for d in meter_locations.values()) or "—"}</span>')
         rh += popup_row("Lat", f"{tubewell_coord[0]:.6f}°N")
         rh += popup_row("Lon", f"{tubewell_coord[1]:.6f}°E")
-        # only show tubewell pin if NO mappable meters
         if not mappable_meters:
             folium.Marker(location=tubewell_coord, tooltip="💧 Tubewell (no meter)",
                 popup=make_popup('#0d2137','💧 Tubewell',rh,*tubewell_coord),
                 icon=folium.Icon(color='blue',icon='tint',prefix='fa')).add_to(m)
 
-    # show ALL meters that have parseable coords (purple pins) — #4 fix
     for i, mdata in mappable_meters.items():
         mc   = mdata['coord']
         mser = mdata['serial']
         mact = mdata['active']
-        # snap meter inside polygon if outside
         mc_display = snap_inside_polygon(mc, polygon_coords) if polygon_coords and not point_in_polygon(mc, polygon_coords) else mc
         rh  = popup_row("Serial", f'<b>{mser}</b>')
         rh += popup_row("Active", mact)
@@ -555,14 +623,12 @@ with col2:
             popup=make_popup('#4a0080',f'🟣 Water Meter {i}',rh,*mc_display,mw=260),
             icon=folium.Icon(color='purple',icon='tint',prefix='fa')).add_to(m)
 
-    # PVC Pipes — #3: snap inside polygon if outside
     for i in [1,2,3,4,5]:
         ploc  = v(row,f'Kharif 25 PVC Pipe location / {i}')
         pcode = v(row,f'Kharif 25 PVC Pipe code / {i}')
         if ploc:
             pc = parse_any(ploc)
             if pc:
-                # snap pipe inside polygon if it's outside
                 pc_display = snap_inside_polygon(pc, polygon_coords) if polygon_coords and not point_in_polygon(pc, polygon_coords) else pc
                 rh  = popup_row("Code",   f'<b>{pcode}</b>')
                 rh += popup_row("Farmer", farmer_name)
@@ -583,7 +649,6 @@ with col2:
     folium.LayerControl().add_to(m)
     st_folium(m, width=None, height=490, returned_objects=[])
 
-    # Dynamic legend
     parts = ['<span style="color:#3fb950">■</span> Farm Polygon'] if polygon_coords else []
     if tubewell_coord and not mappable_meters:
         parts.append('<span style="color:#58a6ff">●</span> Tubewell')
@@ -601,4 +666,4 @@ with col2:
                 f'🧭 Open in Google Maps</a>')
     st.markdown(f'<div class="card" style="margin-top:8px"><div class="card-title">Coordinates &amp; Navigation</div>{"".join(rows_c)}{nav_link}</div>', unsafe_allow_html=True)
 
-st.markdown(f'<hr style="border-color:#21262d;margin:20px 0"><p style="color:#484f58;font-size:0.76rem;text-align:center">🌍 Digital Village Project &nbsp;·&nbsp; Tel Aviv University &amp; Thapar University, Patiala &nbsp;·&nbsp; Research Lead: Dan Uriel Etgar &nbsp;·&nbsp; Dashboard: Satyam Yadav &nbsp;·&nbsp; {len(df)} farms</p>', unsafe_allow_html=True)
+st.markdown(f'<hr style="border-color:#21262d;margin:20px 0"><p style="color:#484f58;font-size:0.76rem;text-align:center">🌍 Digital Village Project &nbsp;·&nbsp; Tel Aviv University &amp; Thapar University, Patiala &nbsp;·&nbsp; Research Lead: Dan Uriel Etgar &nbsp;·&nbsp; Dashboard: Satyam Yadav &nbsp;·&nbsp; {len(df)} farms with map data</p>', unsafe_allow_html=True)
