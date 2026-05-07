@@ -52,23 +52,32 @@ footer { display: none !important; }
     background:#161b22 !important; color:#e6edf3 !important; border-color:#30363d !important;
 }
 p, label, .stMarkdown { color:#e6edf3 !important; }
-/* Google Sheets style for dev mode */
-.gs-table { border-collapse:collapse; width:100%; font-size:0.82rem; font-family:'Google Sans',Arial,sans-serif; }
-.gs-table th { background:#188038; color:#fff; padding:6px 10px; border:1px solid #16a34a; position:sticky; top:0; z-index:1; white-space:nowrap; }
-.gs-table td { padding:5px 10px; border:1px solid #e2e8f0; color:#1a1a1a; white-space:nowrap; max-width:200px; overflow:hidden; text-overflow:ellipsis; }
-.gs-table tr:nth-child(even) td { background:#f8fffe; }
-.gs-table tr:nth-child(odd) td  { background:#ffffff; }
-.gs-table tr:hover td { background:#e8f5e9 !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Session state ─────────────────────────────────────────────────────────────
-if 'dev_mode' not in st.session_state:
-    st.session_state.dev_mode = False
-if 'dev_pw_input' not in st.session_state:
-    st.session_state.dev_pw_input = ''
+# ── Dev accounts ──────────────────────────────────────────────────────────────
+DEV_ACCOUNTS = {
+    "Satyamyadav19125": {
+        "password":    "finnwolfhard@666",
+        "display":     "Satyam Yadav",
+        "role":        "Lead Research Assistant",
+        "avatar":      "🧑‍💻",
+        "badge_color": "#1f6feb",
+    },
+    "Danetgar": {
+        "password":    "etgardan",
+        "display":     "Dan Uriel Etgar",
+        "role":        "Research Lead",
+        "avatar":      "👨‍🔬",
+        "badge_color": "#9b59b6",
+    },
+}
 
-DEV_PASSWORD = os.environ.get('DEV_PASSWORD', 'dvp@2025')
+# ── Session state ─────────────────────────────────────────────────────────────
+for key, default in [('dev_mode', False), ('dev_user', None), ('login_attempts', 0)]:
+    if key not in st.session_state:
+        st.session_state[key] = default
+
 
 # ── Data loaders ──────────────────────────────────────────────────────────────
 @st.cache_data(ttl=300, show_spinner="🌾 Loading farm data…")
@@ -91,7 +100,6 @@ def load_data():
                 continue
         raise Exception(f"Could not fetch sheet '{sheet_name}' from {sheet_id}")
 
-    # Farm Master
     df_full = fetch_sheet("10_bnGF7WBZ0J3aSvl8riufNbZjXAxB7wcnN3545fGzw", "Farm details")
     df_full.columns = [str(c).strip() for c in df_full.columns]
     df_k = df_full.iloc[:, 65:121].copy()
@@ -100,7 +108,6 @@ def load_data():
     df_k['Farm ID'] = df_k['Farm ID'].str.strip()
     df_k = df_k[df_k['Farm ID'].notna() & (df_k['Farm ID'] != '')]
 
-    # Libertalia
     df_lib = fetch_sheet("14ah-7Ah690oeOXE5vT8p701LYv7PiEMx_xZycNOOrSA", "master_control")
     df_lib.columns = [str(c).strip() for c in df_lib.columns]
 
@@ -129,7 +136,6 @@ def load_data():
 
 @st.cache_data(ttl=300, show_spinner="📊 Loading full sheets for dev view…")
 def load_full_sheets():
-    """Loads the COMPLETE raw sheets for the dev view — all columns, all rows."""
     import requests
     from io import StringIO
 
@@ -148,10 +154,10 @@ def load_full_sheets():
                 continue
         raise Exception(f"Could not fetch '{sheet_name}'")
 
-    df_farm  = fetch("10_bnGF7WBZ0J3aSvl8riufNbZjXAxB7wcnN3545fGzw", "Farm details")
-    df_lib   = fetch("14ah-7Ah690oeOXE5vT8p701LYv7PiEMx_xZycNOOrSA", "master_control")
-    df_farm.columns  = [str(c).strip() for c in df_farm.columns]
-    df_lib.columns   = [str(c).strip() for c in df_lib.columns]
+    df_farm = fetch("10_bnGF7WBZ0J3aSvl8riufNbZjXAxB7wcnN3545fGzw", "Farm details")
+    df_lib  = fetch("14ah-7Ah690oeOXE5vT8p701LYv7PiEMx_xZycNOOrSA", "master_control")
+    df_farm.columns = [str(c).strip() for c in df_farm.columns]
+    df_lib.columns  = [str(c).strip() for c in df_lib.columns]
     return df_farm, df_lib
 
 
@@ -289,8 +295,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("#### ⬇️ Download Data")
 
-    # Build filtered df for download
-    filtered_df = df_all[df_all['Farm ID'].isin(filtered_ids)].copy()
+    filtered_df    = df_all[df_all['Farm ID'].isin(filtered_ids)].copy()
     current_row_df = df_all[df_all['Farm ID'] == selected_id].copy() if selected_id else pd.DataFrame()
 
     dl_choice = st.radio("What to download", [
@@ -306,7 +311,7 @@ with st.sidebar:
         dl_name = f"farm_{selected_id}"
     elif dl_choice == "🔍 Current filter results":
         dl_df   = filtered_df
-        dl_name = f"farms_filtered_{filter_opt.split()[1] if len(filter_opt.split())>1 else 'all'}"
+        dl_name = f"farms_filtered"
     else:
         dl_df   = df_all.copy()
         dl_name = "farms_all"
@@ -315,7 +320,7 @@ with st.sidebar:
 
     if dl_format == "CSV":
         st.download_button(
-            label=f"⬇️ Download {dl_format}",
+            label="⬇️ Download CSV",
             data=df_to_csv(dl_df),
             file_name=f"{dl_name}.csv",
             mime="text/csv",
@@ -323,13 +328,12 @@ with st.sidebar:
         )
     else:
         st.download_button(
-            label=f"⬇️ Download {dl_format}",
+            label="⬇️ Download Excel",
             data=df_to_excel(dl_df),
             file_name=f"{dl_name}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
-
     st.caption(f"{len(dl_df)} rows · {len(dl_df.columns)} columns")
 
     # ── Dev Login ─────────────────────────────────────────────────────────────
@@ -337,29 +341,71 @@ with st.sidebar:
     st.markdown("#### 🔐 Developer Access")
 
     if st.session_state.dev_mode:
-        st.success("✅ Dev mode active")
-        if st.button("🔒 Logout", use_container_width=True):
+        user_info = DEV_ACCOUNTS[st.session_state.dev_user]
+        st.markdown(f"""
+        <div style="background:linear-gradient(135deg,#0d2137,#1a0a3d);border-radius:10px;
+             padding:10px 14px;border:1px solid #3d1e7a;margin-bottom:8px">
+          <div style="font-size:1.1rem">{user_info['avatar']} <b style="color:#fff">{user_info['display']}</b></div>
+          <div style="font-size:0.75rem;color:#a78bfa;margin-top:2px">{user_info['role']}</div>
+          <div style="margin-top:6px">
+            <span style="background:{user_info['badge_color']};color:#fff;padding:2px 8px;
+                  border-radius:20px;font-size:0.72rem;font-weight:600">✅ Dev Mode Active</span>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("🔒 Logout", use_container_width=True, key="logout_btn"):
             st.session_state.dev_mode = False
+            st.session_state.dev_user = None
+            st.session_state.login_attempts = 0
             st.rerun()
     else:
-        pw = st.text_input("Password", type="password", placeholder="Enter dev password…", label_visibility="collapsed")
-        if st.button("🔓 Login", use_container_width=True):
-            if pw == DEV_PASSWORD:
-                st.session_state.dev_mode = True
-                st.rerun()
-            else:
-                st.error("Wrong password")
+        # Lock out after 5 failed attempts
+        if st.session_state.login_attempts >= 5:
+            st.error("🔒 Too many failed attempts. Reload the page to try again.")
+        else:
+            username_input = st.text_input(
+                "Username", placeholder="Enter username…",
+                label_visibility="collapsed", key="dev_username"
+            )
+            password_input = st.text_input(
+                "Password", type="password", placeholder="Enter password…",
+                label_visibility="collapsed", key="dev_password"
+            )
+            if st.button("🔓 Login as Developer", use_container_width=True, key="login_btn"):
+                username_input = username_input.strip()
+                if username_input in DEV_ACCOUNTS and DEV_ACCOUNTS[username_input]["password"] == password_input:
+                    st.session_state.dev_mode = True
+                    st.session_state.dev_user = username_input
+                    st.session_state.login_attempts = 0
+                    st.rerun()
+                else:
+                    st.session_state.login_attempts += 1
+                    remaining = 5 - st.session_state.login_attempts
+                    st.error(f"❌ Wrong username or password. {remaining} attempt(s) left.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DEV MODE VIEW — full Google Sheets style tables
+# DEV MODE — Full Raw Sheets View
 # ══════════════════════════════════════════════════════════════════════════════
 if st.session_state.dev_mode:
-    st.markdown("""
+    user_info = DEV_ACCOUNTS[st.session_state.dev_user]
+
+    st.markdown(f"""
     <div style="background:linear-gradient(135deg,#0d2137,#1a0a3d);border-radius:14px;
-         padding:18px 24px;margin-bottom:18px;border:1px solid #3d1e7a">
-      <h2 style="margin:0;color:#fff;font-size:1.4rem">🔐 Developer View — Raw Google Sheets Data</h2>
-      <div style="color:#a78bfa;font-size:0.85rem;margin-top:4px">Full unfiltered data from both source sheets</div>
+         padding:18px 24px;margin-bottom:18px;border:1px solid #3d1e7a;
+         display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+      <div>
+        <h2 style="margin:0;color:#fff;font-size:1.35rem">
+          🔐 Developer View &nbsp;·&nbsp; {user_info['avatar']} {user_info['display']}
+        </h2>
+        <div style="color:#a78bfa;font-size:0.83rem;margin-top:4px">
+          {user_info['role']} &nbsp;·&nbsp; Full unfiltered data from both source Google Sheets
+        </div>
+      </div>
+      <span style="background:{user_info['badge_color']};color:#fff;padding:4px 14px;
+            border-radius:20px;font-size:0.8rem;font-weight:700">
+        ✅ {user_info['role'].upper()}
+      </span>
     </div>
     """, unsafe_allow_html=True)
 
@@ -371,32 +417,44 @@ if st.session_state.dev_mode:
             st.stop()
 
     tab1, tab2 = st.tabs([
-        f"📋 Farm Master  ({len(df_farm_full)} rows · {len(df_farm_full.columns)} cols)",
-        f"🗺️ Libertalia master_control  ({len(df_lib_full)} rows · {len(df_lib_full.columns)} cols)",
+        f"📋 Farm Master  —  {len(df_farm_full)} rows · {len(df_farm_full.columns)} cols",
+        f"🗺️ Libertalia master_control  —  {len(df_lib_full)} rows · {len(df_lib_full.columns)} cols",
     ])
 
-    def render_sheet(df_sheet, sheet_label):
-        # Search & filter row
-        c1, c2, c3 = st.columns([2, 1, 1])
+    def render_dev_sheet(df_sheet, sheet_label):
+        c1, c2, c3, c4 = st.columns([2.5, 1.5, 1, 1])
+
         with c1:
-            search_dev = st.text_input(f"🔍 Search in {sheet_label}", placeholder="Type anything to filter rows…", key=f"dev_search_{sheet_label}")
+            search_dev = st.text_input(
+                f"Search", placeholder=f"Search anything in {sheet_label}…",
+                label_visibility="collapsed", key=f"search_{sheet_label}"
+            )
         with c2:
             cols_list  = ["All columns"] + list(df_sheet.columns)
-            col_filter = st.selectbox("Column", cols_list, key=f"dev_col_{sheet_label}")
+            col_filter = st.selectbox("Column", cols_list, label_visibility="collapsed", key=f"col_{sheet_label}")
         with c3:
-            st.markdown("<br>", unsafe_allow_html=True)
-            # Download full raw sheet
-            dl_raw_csv = df_sheet.to_csv(index=False).encode('utf-8')
             st.download_button(
-                f"⬇️ Download full sheet",
-                data=dl_raw_csv,
-                file_name=f"{sheet_label.lower().replace(' ','_')}.csv",
+                "⬇️ CSV",
+                data=df_sheet.to_csv(index=False).encode('utf-8'),
+                file_name=f"{re.sub(r'[^a-z0-9]','_', sheet_label.lower())}_full.csv",
                 mime="text/csv",
                 use_container_width=True,
-                key=f"dl_{sheet_label}"
+                key=f"csv_{sheet_label}"
+            )
+        with c4:
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+                df_sheet.to_excel(writer, index=False, sheet_name=sheet_label[:31])
+            st.download_button(
+                "⬇️ Excel",
+                data=buf.getvalue(),
+                file_name=f"{re.sub(r'[^a-z0-9]','_', sheet_label.lower())}_full.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key=f"xl_{sheet_label}"
             )
 
-        # Apply search filter
+        # Filter
         display_df = df_sheet.copy()
         if search_dev:
             q = search_dev.lower()
@@ -408,24 +466,19 @@ if st.session_state.dev_mode:
 
         st.caption(f"Showing **{len(display_df)}** of **{len(df_sheet)}** rows · **{len(display_df.columns)}** columns")
 
-        # Render as interactive Streamlit dataframe (sortable, resizable)
-        st.dataframe(
-            display_df,
-            use_container_width=True,
-            height=600,
-        )
+        st.dataframe(display_df, use_container_width=True, height=620)
 
     with tab1:
-        render_sheet(df_farm_full, "Farm Master")
+        render_dev_sheet(df_farm_full, "Farm Master")
 
     with tab2:
-        render_sheet(df_lib_full, "Libertalia")
+        render_dev_sheet(df_lib_full, "Libertalia")
 
-    st.stop()   # Don't render the normal dashboard below when in dev mode
+    st.stop()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# NORMAL DASHBOARD VIEW
+# NORMAL DASHBOARD
 # ══════════════════════════════════════════════════════════════════════════════
 if not selected_id:
     st.info("No farms found."); st.stop()
@@ -592,31 +645,39 @@ with col2:
 
     meter_locations = {}
     for i in [1,2]:
-        mloc=v(row,f'Kharif 25 Meter location / {i}'); mser=v(row,f'Kharif 25 Meter serial number / {i}'); mact=v(row,f'Kharif 25 Meter active / {i} (Y/N)')
+        mloc=v(row,f'Kharif 25 Meter location / {i}')
+        mser=v(row,f'Kharif 25 Meter serial number / {i}')
+        mact=v(row,f'Kharif 25 Meter active / {i} (Y/N)')
         if mser:
             mc=parse_any(mloc) if mloc else None
             meter_locations[i]={'coord':mc,'serial':mser,'active':mact,'loc_raw':mloc}
     mappable_meters={i:d for i,d in meter_locations.items() if d['coord']}
 
     if polygon_coords:
-        clat=sum(c[0] for c in polygon_coords)/len(polygon_coords); clon=sum(c[1] for c in polygon_coords)/len(polygon_coords)
+        clat=sum(c[0] for c in polygon_coords)/len(polygon_coords)
+        clon=sum(c[1] for c in polygon_coords)/len(polygon_coords)
     elif mappable_meters: clat,clon=list(mappable_meters.values())[0]['coord']
     elif tubewell_coord:  clat,clon=tubewell_coord
     else: clat,clon=30.41,76.42
 
     if not polygon_coords and not tubewell_coord and not mappable_meters:
-        st.markdown("""<div style="background:#161b22;border:1px solid #30363d;border-radius:12px;padding:40px 24px;text-align:center;margin-top:10px">
+        st.markdown("""<div style="background:#161b22;border:1px solid #30363d;border-radius:12px;
+             padding:40px 24px;text-align:center;margin-top:10px">
           <div style="font-size:2.5rem;margin-bottom:12px">📭</div>
           <div style="color:#e6edf3;font-size:1.05rem;font-weight:600;margin-bottom:8px">Location Data Unavailable</div>
-          <div style="color:#8b949e;font-size:0.84rem;line-height:1.6">No matching location data in Libertalia.<br><span style="color:#58a6ff">Farm details above are still complete.</span></div>
+          <div style="color:#8b949e;font-size:0.84rem;line-height:1.6">No matching location data in Libertalia.<br>
+          <span style="color:#58a6ff">Farm details above are still complete.</span></div>
         </div>""", unsafe_allow_html=True)
         st.stop()
 
     m = folium.Map(location=[clat,clon], zoom_start=16, tiles="OpenStreetMap")
-    folium.TileLayer(tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',attr='Esri',name='Satellite',overlay=False,control=True).add_to(m)
+    folium.TileLayer(
+        tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+        attr='Esri', name='Satellite', overlay=False, control=True
+    ).add_to(m)
     try:
         from folium.plugins import LocateControl
-        LocateControl(position='topleft',flyTo=True,locateOptions={"enableHighAccuracy":True}).add_to(m)
+        LocateControl(position='topleft', flyTo=True, locateOptions={"enableHighAccuracy":True}).add_to(m)
     except: pass
 
     css="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;min-width:210px;color:#24292f"
@@ -630,31 +691,41 @@ with col2:
         rh=popup_row("Farmer",farmer_name)+popup_row("Phone",farmer_phone)+popup_row("Village",village)+popup_row("Block",block)
         ac=v(row,'Kharif 25 Acres farm / farmer reporting')
         if ac: rh+=popup_row("Acres",ac)
-        tp=clean_date(v(row,'Kharif 25 Paddy transplanting date (TPR)')); hv=clean_date(v(row,'Kharif 25 Paddy Harvest date'))
+        tp=clean_date(v(row,'Kharif 25 Paddy transplanting date (TPR)'))
+        hv=clean_date(v(row,'Kharif 25 Paddy Harvest date'))
         if tp: rh+=popup_row("Transplant",tp)
         if hv: rh+=popup_row("Harvest",hv)
-        folium.Polygon(locations=polygon_coords,color='#2ea043',fill=True,fill_color='#3fb950',fill_opacity=0.25,weight=2.5,tooltip="🌾 Click for farm details",popup=make_popup('#0a3d1f',f'🌾 {v(row,"Farm ID")}',rh,clat,clon)).add_to(m)
+        folium.Polygon(locations=polygon_coords,color='#2ea043',fill=True,fill_color='#3fb950',
+            fill_opacity=0.25,weight=2.5,tooltip="🌾 Click for farm details",
+            popup=make_popup('#0a3d1f',f'🌾 {v(row,"Farm ID")}',rh,clat,clon)).add_to(m)
 
     if tubewell_coord and not mappable_meters:
         rh=popup_row("Farm",v(row,'Farm ID'))+popup_row("Farmer",farmer_name)+popup_row("Phone",farmer_phone)+popup_row("Village",village)+popup_row("Block",block)
         rh+=popup_row("Lat",f"{tubewell_coord[0]:.6f}°N")+popup_row("Lon",f"{tubewell_coord[1]:.6f}°E")
-        folium.Marker(location=tubewell_coord,tooltip="💧 Tubewell (no meter)",popup=make_popup('#0d2137','💧 Tubewell',rh,*tubewell_coord),icon=folium.Icon(color='blue',icon='tint',prefix='fa')).add_to(m)
+        folium.Marker(location=tubewell_coord,tooltip="💧 Tubewell (no meter)",
+            popup=make_popup('#0d2137','💧 Tubewell',rh,*tubewell_coord),
+            icon=folium.Icon(color='blue',icon='tint',prefix='fa')).add_to(m)
 
     for i,mdata in mappable_meters.items():
         mc=mdata['coord']; mser=mdata['serial']; mact=mdata['active']
         mc_d=snap_inside_polygon(mc,polygon_coords) if polygon_coords and not point_in_polygon(mc,polygon_coords) else mc
         rh=popup_row("Serial",f'<b>{mser}</b>')+popup_row("Active",mact)+popup_row("Farmer",farmer_name)+popup_row("Phone",farmer_phone)+popup_row("Lat",f"{mc[0]:.6f}°N")+popup_row("Lon",f"{mc[1]:.6f}°E")
-        folium.Marker(location=mc_d,tooltip=f"🟣 Meter {i}: {mser}",popup=make_popup('#4a0080',f'🟣 Water Meter {i}',rh,*mc_d,mw=260),icon=folium.Icon(color='purple',icon='tint',prefix='fa')).add_to(m)
+        folium.Marker(location=mc_d,tooltip=f"🟣 Meter {i}: {mser}",
+            popup=make_popup('#4a0080',f'🟣 Water Meter {i}',rh,*mc_d,mw=260),
+            icon=folium.Icon(color='purple',icon='tint',prefix='fa')).add_to(m)
 
     for i in [1,2,3,4,5]:
-        ploc=v(row,f'Kharif 25 PVC Pipe location / {i}'); pcode=v(row,f'Kharif 25 PVC Pipe code / {i}')
+        ploc=v(row,f'Kharif 25 PVC Pipe location / {i}')
+        pcode=v(row,f'Kharif 25 PVC Pipe code / {i}')
         if ploc:
             pc=parse_any(ploc)
             if pc:
                 pc_d=snap_inside_polygon(pc,polygon_coords) if polygon_coords and not point_in_polygon(pc,polygon_coords) else pc
                 rh=popup_row("Code",f'<b>{pcode}</b>')+popup_row("Farmer",farmer_name)+popup_row("Phone",farmer_phone)+popup_row("Orig Lat",f"{pc[0]:.6f}°N")+popup_row("Orig Lon",f"{pc[1]:.6f}°E")
                 pipe_icon=folium.DivIcon(html='<div style="background:#c0392b;color:white;border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-size:13px;border:2px solid #fff;box-shadow:0 2px 4px rgba(0,0,0,0.5)">🪧</div>',icon_size=(26,26),icon_anchor=(13,13))
-                folium.Marker(location=pc_d,tooltip=f"🔴 Pipe {i}: {pcode}",popup=make_popup('#7b0000',f'🔴 PVC Pipe {i}',rh,*pc_d,mw=230),icon=pipe_icon).add_to(m)
+                folium.Marker(location=pc_d,tooltip=f"🔴 Pipe {i}: {pcode}",
+                    popup=make_popup('#7b0000',f'🔴 PVC Pipe {i}',rh,*pc_d,mw=230),
+                    icon=pipe_icon).add_to(m)
 
     folium.LayerControl().add_to(m)
     st_folium(m, width=None, height=490, returned_objects=[])
@@ -666,7 +737,9 @@ with col2:
     if parts: st.markdown(f'<div style="background:#161b22;border:1px solid #21262d;border-radius:8px;padding:8px 14px;font-size:0.8rem;color:#8b949e;margin-top:6px">{"&nbsp;&nbsp;".join(parts)}</div>',unsafe_allow_html=True)
 
     rows_c=[kv_row("Center",f"{clat:.5f}°N, {clon:.5f}°E")]
-    nav_link=(f'<a href="https://www.google.com/maps/dir/?api=1&destination={clat},{clon}" target="_blank" style="background:#238636;color:#fff;padding:6px 14px;border-radius:6px;text-decoration:none;font-size:0.82rem;font-weight:600;display:inline-block;margin-top:8px">🧭 Open in Google Maps</a>')
+    nav_link=(f'<a href="https://www.google.com/maps/dir/?api=1&destination={clat},{clon}" target="_blank" '
+              f'style="background:#238636;color:#fff;padding:6px 14px;border-radius:6px;text-decoration:none;'
+              f'font-size:0.82rem;font-weight:600;display:inline-block;margin-top:8px">🧭 Open in Google Maps</a>')
     st.markdown(f'<div class="card" style="margin-top:8px"><div class="card-title">Coordinates &amp; Navigation</div>{"".join(rows_c)}{nav_link}</div>',unsafe_allow_html=True)
 
 st.markdown(f'<hr style="border-color:#21262d;margin:20px 0"><p style="color:#484f58;font-size:0.76rem;text-align:center">🌍 Digital Village Project &nbsp;·&nbsp; Tel Aviv University &amp; Thapar University, Patiala &nbsp;·&nbsp; Research Lead: Dan Uriel Etgar &nbsp;·&nbsp; Dashboard: Satyam Yadav &nbsp;·&nbsp; {len(df)} farms</p>',unsafe_allow_html=True)
