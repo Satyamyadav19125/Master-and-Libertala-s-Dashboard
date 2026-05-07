@@ -1,4 +1,4 @@
-import os, re
+import os, re, io
 import streamlit as st
 import pandas as pd
 import folium
@@ -52,11 +52,26 @@ footer { display: none !important; }
     background:#161b22 !important; color:#e6edf3 !important; border-color:#30363d !important;
 }
 p, label, .stMarkdown { color:#e6edf3 !important; }
+/* Google Sheets style for dev mode */
+.gs-table { border-collapse:collapse; width:100%; font-size:0.82rem; font-family:'Google Sans',Arial,sans-serif; }
+.gs-table th { background:#188038; color:#fff; padding:6px 10px; border:1px solid #16a34a; position:sticky; top:0; z-index:1; white-space:nowrap; }
+.gs-table td { padding:5px 10px; border:1px solid #e2e8f0; color:#1a1a1a; white-space:nowrap; max-width:200px; overflow:hidden; text-overflow:ellipsis; }
+.gs-table tr:nth-child(even) td { background:#f8fffe; }
+.gs-table tr:nth-child(odd) td  { background:#ffffff; }
+.gs-table tr:hover td { background:#e8f5e9 !important; }
 </style>
 """, unsafe_allow_html=True)
 
+# ── Session state ─────────────────────────────────────────────────────────────
+if 'dev_mode' not in st.session_state:
+    st.session_state.dev_mode = False
+if 'dev_pw_input' not in st.session_state:
+    st.session_state.dev_pw_input = ''
 
-@st.cache_data(ttl=300, show_spinner="🌾 Loading farm data from Google Sheets…")
+DEV_PASSWORD = os.environ.get('DEV_PASSWORD', 'dvp@2025')
+
+# ── Data loaders ──────────────────────────────────────────────────────────────
+@st.cache_data(ttl=300, show_spinner="🌾 Loading farm data…")
 def load_data():
     import requests
     from io import StringIO
@@ -76,7 +91,7 @@ def load_data():
                 continue
         raise Exception(f"Could not fetch sheet '{sheet_name}' from {sheet_id}")
 
-    # ── Farm Master — "Farm details" sheet ───────────────────────────────────
+    # Farm Master
     df_full = fetch_sheet("10_bnGF7WBZ0J3aSvl8riufNbZjXAxB7wcnN3545fGzw", "Farm details")
     df_full.columns = [str(c).strip() for c in df_full.columns]
     df_k = df_full.iloc[:, 65:121].copy()
@@ -85,11 +100,10 @@ def load_data():
     df_k['Farm ID'] = df_k['Farm ID'].str.strip()
     df_k = df_k[df_k['Farm ID'].notna() & (df_k['Farm ID'] != '')]
 
-    # ── Libertalia — "master_control" sheet ──────────────────────────────────
+    # Libertalia
     df_lib = fetch_sheet("14ah-7Ah690oeOXE5vT8p701LYv7PiEMx_xZycNOOrSA", "master_control")
     df_lib.columns = [str(c).strip() for c in df_lib.columns]
 
-    # ── SAFE column finder (handles any capitalization or spacing) ────────────
     def find_col(df, candidates):
         col_map = {c.lower().strip(): c for c in df.columns}
         for candidate in candidates:
@@ -97,33 +111,49 @@ def load_data():
                 return col_map[candidate.lower().strip()]
         return None
 
-    col_plot     = find_col(df_lib, ['Plot code', 'plot code', 'Plot Code', 'PLOT CODE', 'plotcode', 'Plot_code', 'plot_code'])
-    col_polygons = find_col(df_lib, ['polygons', 'Polygons', 'POLYGONS', 'Polygon', 'polygon'])
-    col_tw       = find_col(df_lib, ['tw location', 'TW location', 'TW Location', 'TW LOCATION', 'tw_location', 'tubewell location', 'Tubewell Location'])
+    col_plot     = find_col(df_lib, ['Plot code','plot code','Plot Code','PLOT CODE','plotcode','Plot_code'])
+    col_polygons = find_col(df_lib, ['polygons','Polygons','POLYGONS','Polygon','polygon'])
+    col_tw       = find_col(df_lib, ['tw location','TW location','TW Location','TW LOCATION','tw_location','tubewell location'])
 
-    # If any column is still not found, show a helpful error with actual column names
-    missing = []
-    if col_plot     is None: missing.append('Plot code')
-    if col_polygons is None: missing.append('polygons')
-    if col_tw       is None: missing.append('tw location')
-
+    missing = [n for n,c in [('Plot code',col_plot),('polygons',col_polygons),('tw location',col_tw)] if c is None]
     if missing:
-        actual_cols = list(df_lib.columns)
-        raise Exception(
-            f"Missing columns in Libertalia sheet: {missing}\n"
-            f"Actual columns found: {actual_cols}"
-        )
+        raise Exception(f"Missing columns {missing} in Libertalia. Found: {list(df_lib.columns)}")
 
-    df_lib = df_lib[[col_plot, col_polygons, col_tw]].copy()
-    df_lib.rename(columns={
-        col_plot:     'Farm ID',
-        col_polygons: 'polygons',
-        col_tw:       'tw location'
-    }, inplace=True)
-    df_lib['Farm ID'] = df_lib['Farm ID'].str.strip()
+    df_lib2 = df_lib[[col_plot, col_polygons, col_tw]].copy()
+    df_lib2.rename(columns={col_plot:'Farm ID', col_polygons:'polygons', col_tw:'tw location'}, inplace=True)
+    df_lib2['Farm ID'] = df_lib2['Farm ID'].str.strip()
 
-    df = pd.merge(df_k, df_lib, on='Farm ID', how='inner')
+    df = pd.merge(df_k, df_lib2, on='Farm ID', how='inner')
     return df, df_k
+
+
+@st.cache_data(ttl=300, show_spinner="📊 Loading full sheets for dev view…")
+def load_full_sheets():
+    """Loads the COMPLETE raw sheets for the dev view — all columns, all rows."""
+    import requests
+    from io import StringIO
+
+    def fetch(sheet_id, sheet_name):
+        urls = [
+            f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={requests.utils.quote(sheet_name)}",
+            f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&sheet={requests.utils.quote(sheet_name)}",
+        ]
+        headers = {"User-Agent": "Mozilla/5.0"}
+        for url in urls:
+            try:
+                r = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
+                if r.status_code == 200 and len(r.text) > 100:
+                    return pd.read_csv(StringIO(r.text), dtype=str, keep_default_na=False)
+            except Exception:
+                continue
+        raise Exception(f"Could not fetch '{sheet_name}'")
+
+    df_farm  = fetch("10_bnGF7WBZ0J3aSvl8riufNbZjXAxB7wcnN3545fGzw", "Farm details")
+    df_lib   = fetch("14ah-7Ah690oeOXE5vT8p701LYv7PiEMx_xZycNOOrSA", "master_control")
+    df_farm.columns  = [str(c).strip() for c in df_farm.columns]
+    df_lib.columns   = [str(c).strip() for c in df_lib.columns]
+    return df_farm, df_lib
+
 
 df, df_all = load_data()
 
@@ -156,7 +186,7 @@ def parse_decimal(raw):
     return None
 
 def parse_dms(s):
-    s2 = s.replace('\xb0', '°').replace('\u2019', "'").replace('\u201d', '"').replace('\u2033', '"')
+    s2 = s.replace('\xb0','°').replace('\u2019',"'").replace('\u201d','"').replace('\u2033','"')
     m = re.findall(r"(\d+)°(\d+)'([\d.]+)\"?([NSEW])", s2)
     if len(m) >= 2:
         def dd(d, mn, sc, di):
@@ -166,7 +196,7 @@ def parse_dms(s):
     return None
 
 def parse_any(raw):
-    if not raw or str(raw).strip() in ('nan', 'None', ''): return None
+    if not raw or str(raw).strip() in ('nan','None',''): return None
     pt = parse_decimal(raw)
     if pt: return pt
     return parse_dms(raw)
@@ -187,6 +217,15 @@ def dkv_row(key, content, code=False):
 def has_active_meter(row): return any(v(row,f'Kharif 25 Meter active / {i} (Y/N)').upper() in('Y','YES','1') for i in[1,2])
 def has_meter(row):        return any(v(row,f'Kharif 25 Meter serial number / {i}') for i in[1,2])
 def has_pipe(row):         return any(v(row,f'Kharif 25 PVC Pipe location / {i}') for i in[1,2,3,4,5])
+
+def df_to_csv(dataframe):
+    return dataframe.to_csv(index=False).encode('utf-8')
+
+def df_to_excel(dataframe):
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+        dataframe.to_excel(writer, index=False, sheet_name='Farm Data')
+    return buf.getvalue()
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -219,8 +258,7 @@ with st.sidebar:
         "✅ Active meter","⛔ Inactive meter","🔧 Has PVC pipes","🪣 No PVC pipes",
     ], label_visibility="collapsed")
 
-    all_records_list = df.to_dict('records')
-    all_kharif_list  = df_all.to_dict('records')
+    all_kharif_list = df_all.to_dict('records')
     fmap = {
         "💧 Has water meter":  lambda r: has_meter(r),
         "🚫 No water meter":   lambda r: not has_meter(r),
@@ -229,10 +267,7 @@ with st.sidebar:
         "🔧 Has PVC pipes":    lambda r: has_pipe(r),
         "🪣 No PVC pipes":     lambda r: not has_pipe(r),
     }
-    if filter_opt in fmap:
-        pool = [r for r in all_kharif_list if fmap[filter_opt](r)]
-    else:
-        pool = all_kharif_list
+    pool = [r for r in all_kharif_list if fmap[filter_opt](r)] if filter_opt in fmap else all_kharif_list
     pool_ids = sorted(set(r['Farm ID'] for r in pool))
 
     if search:
@@ -245,20 +280,159 @@ with st.sidebar:
         filtered_ids = pool_ids
 
     st.caption(f"**{len(filtered_ids)}** farms")
-
     if not filtered_ids:
         st.warning("No farms match."); st.stop()
 
     selected_id = st.selectbox("Select farm", filtered_ids, index=0, label_visibility="collapsed")
 
+    # ── Download Section ──────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### ⬇️ Download Data")
 
+    # Build filtered df for download
+    filtered_df = df_all[df_all['Farm ID'].isin(filtered_ids)].copy()
+    current_row_df = df_all[df_all['Farm ID'] == selected_id].copy() if selected_id else pd.DataFrame()
+
+    dl_choice = st.radio("What to download", [
+        "📄 Current farm only",
+        "🔍 Current filter results",
+        "🌾 All farms",
+    ], label_visibility="collapsed")
+
+    dl_format = st.radio("File format", ["CSV", "Excel (.xlsx)"], horizontal=True, label_visibility="collapsed")
+
+    if dl_choice == "📄 Current farm only":
+        dl_df   = current_row_df
+        dl_name = f"farm_{selected_id}"
+    elif dl_choice == "🔍 Current filter results":
+        dl_df   = filtered_df
+        dl_name = f"farms_filtered_{filter_opt.split()[1] if len(filter_opt.split())>1 else 'all'}"
+    else:
+        dl_df   = df_all.copy()
+        dl_name = "farms_all"
+
+    dl_name = re.sub(r'[^a-zA-Z0-9_\-]', '_', dl_name)
+
+    if dl_format == "CSV":
+        st.download_button(
+            label=f"⬇️ Download {dl_format}",
+            data=df_to_csv(dl_df),
+            file_name=f"{dl_name}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+    else:
+        st.download_button(
+            label=f"⬇️ Download {dl_format}",
+            data=df_to_excel(dl_df),
+            file_name=f"{dl_name}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+
+    st.caption(f"{len(dl_df)} rows · {len(dl_df.columns)} columns")
+
+    # ── Dev Login ─────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### 🔐 Developer Access")
+
+    if st.session_state.dev_mode:
+        st.success("✅ Dev mode active")
+        if st.button("🔒 Logout", use_container_width=True):
+            st.session_state.dev_mode = False
+            st.rerun()
+    else:
+        pw = st.text_input("Password", type="password", placeholder="Enter dev password…", label_visibility="collapsed")
+        if st.button("🔓 Login", use_container_width=True):
+            if pw == DEV_PASSWORD:
+                st.session_state.dev_mode = True
+                st.rerun()
+            else:
+                st.error("Wrong password")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DEV MODE VIEW — full Google Sheets style tables
+# ══════════════════════════════════════════════════════════════════════════════
+if st.session_state.dev_mode:
+    st.markdown("""
+    <div style="background:linear-gradient(135deg,#0d2137,#1a0a3d);border-radius:14px;
+         padding:18px 24px;margin-bottom:18px;border:1px solid #3d1e7a">
+      <h2 style="margin:0;color:#fff;font-size:1.4rem">🔐 Developer View — Raw Google Sheets Data</h2>
+      <div style="color:#a78bfa;font-size:0.85rem;margin-top:4px">Full unfiltered data from both source sheets</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    with st.spinner("Loading full sheet data…"):
+        try:
+            df_farm_full, df_lib_full = load_full_sheets()
+        except Exception as e:
+            st.error(f"Could not load sheets: {e}")
+            st.stop()
+
+    tab1, tab2 = st.tabs([
+        f"📋 Farm Master  ({len(df_farm_full)} rows · {len(df_farm_full.columns)} cols)",
+        f"🗺️ Libertalia master_control  ({len(df_lib_full)} rows · {len(df_lib_full.columns)} cols)",
+    ])
+
+    def render_sheet(df_sheet, sheet_label):
+        # Search & filter row
+        c1, c2, c3 = st.columns([2, 1, 1])
+        with c1:
+            search_dev = st.text_input(f"🔍 Search in {sheet_label}", placeholder="Type anything to filter rows…", key=f"dev_search_{sheet_label}")
+        with c2:
+            cols_list  = ["All columns"] + list(df_sheet.columns)
+            col_filter = st.selectbox("Column", cols_list, key=f"dev_col_{sheet_label}")
+        with c3:
+            st.markdown("<br>", unsafe_allow_html=True)
+            # Download full raw sheet
+            dl_raw_csv = df_sheet.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                f"⬇️ Download full sheet",
+                data=dl_raw_csv,
+                file_name=f"{sheet_label.lower().replace(' ','_')}.csv",
+                mime="text/csv",
+                use_container_width=True,
+                key=f"dl_{sheet_label}"
+            )
+
+        # Apply search filter
+        display_df = df_sheet.copy()
+        if search_dev:
+            q = search_dev.lower()
+            if col_filter == "All columns":
+                mask = display_df.apply(lambda row: row.astype(str).str.lower().str.contains(q).any(), axis=1)
+            else:
+                mask = display_df[col_filter].astype(str).str.lower().str.contains(q)
+            display_df = display_df[mask]
+
+        st.caption(f"Showing **{len(display_df)}** of **{len(df_sheet)}** rows · **{len(display_df.columns)}** columns")
+
+        # Render as interactive Streamlit dataframe (sortable, resizable)
+        st.dataframe(
+            display_df,
+            use_container_width=True,
+            height=600,
+        )
+
+    with tab1:
+        render_sheet(df_farm_full, "Farm Master")
+
+    with tab2:
+        render_sheet(df_lib_full, "Libertalia")
+
+    st.stop()   # Don't render the normal dashboard below when in dev mode
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# NORMAL DASHBOARD VIEW
+# ══════════════════════════════════════════════════════════════════════════════
 if not selected_id:
     st.info("No farms found."); st.stop()
 
 df_match = df[df['Farm ID'] == selected_id]
 if len(df_match) > 0:
     row = df_match.iloc[0].to_dict()
-    has_map_data = True
 else:
     df_all_match = df_all[df_all['Farm ID'] == selected_id]
     if len(df_all_match) > 0:
@@ -267,26 +441,22 @@ else:
         row['tw location'] = ''
     else:
         st.warning("Farm not found in dataset."); st.stop()
-    has_map_data = False
 
 farmer_name  = v(row, 'Kharif 25 Farmer Name')
 farmer_phone = v(row, 'Kharif 25 Farmer Phone Number')
 village      = v(row, 'Kharif 25 Village')
 block        = v(row, 'Kharif 25 Block')
 
-all_records  = df.to_dict('records')
 all_kharif   = df_all.to_dict('records')
-total_farms  = len(df_all)
-
-c_all      = len(all_kharif)
-c_villages = df_all['Kharif 25 Village'].nunique()
-c_blocks   = df_all['Kharif 25 Block'].nunique()
-c_meter    = sum(1 for r in all_kharif if has_meter(r))
-c_no_meter = sum(1 for r in all_kharif if not has_meter(r))
-c_active   = sum(1 for r in all_kharif if has_active_meter(r))
-c_inactive = sum(1 for r in all_kharif if has_meter(r) and not has_active_meter(r))
-c_pipe     = sum(1 for r in all_kharif if has_pipe(r))
-c_no_pipe  = sum(1 for r in all_kharif if not has_pipe(r))
+c_all        = len(all_kharif)
+c_villages   = df_all['Kharif 25 Village'].nunique()
+c_blocks     = df_all['Kharif 25 Block'].nunique()
+c_meter      = sum(1 for r in all_kharif if has_meter(r))
+c_no_meter   = sum(1 for r in all_kharif if not has_meter(r))
+c_active     = sum(1 for r in all_kharif if has_active_meter(r))
+c_inactive   = sum(1 for r in all_kharif if has_meter(r) and not has_active_meter(r))
+c_pipe       = sum(1 for r in all_kharif if has_pipe(r))
+c_no_pipe    = sum(1 for r in all_kharif if not has_pipe(r))
 
 pool_df       = df_all[df_all['Farm ID'].isin(pool_ids)]
 pool_villages = pool_df['Kharif 25 Village'].nunique()
@@ -301,17 +471,11 @@ chip_configs = {
     "🔧 Has PVC pipes":   (c_pipe,     pool_villages, pool_blocks, c_pipe,     "With Pipes"),
     "🪣 No PVC pipes":    (c_no_pipe,  pool_villages, pool_blocks, c_no_pipe,  "No Pipes"),
 }
-chip1, chip2, chip3, chip4_num, chip4_lbl = chip_configs.get(
-    filter_opt, (c_all, c_villages, c_blocks, c_meter, "With Meter"))
-
+chip1, chip2, chip3, chip4_num, chip4_lbl = chip_configs.get(filter_opt,(c_all,c_villages,c_blocks,c_meter,"With Meter"))
 chip1_labels = {
-    "🌾 All farms":       "Total Farms",
-    "💧 Has water meter": "With Meter",
-    "🚫 No water meter":  "No Meter",
-    "✅ Active meter":    "Active Meter",
-    "⛔ Inactive meter":  "Inactive Meter",
-    "🔧 Has PVC pipes":   "With Pipes",
-    "🪣 No PVC pipes":    "No Pipes",
+    "🌾 All farms":"Total Farms","💧 Has water meter":"With Meter","🚫 No water meter":"No Meter",
+    "✅ Active meter":"Active Meter","⛔ Inactive meter":"Inactive Meter",
+    "🔧 Has PVC pipes":"With Pipes","🪣 No PVC pipes":"No Pipes",
 }
 chip1_lbl = chip1_labels.get(filter_opt, "Total Farms")
 
@@ -336,9 +500,7 @@ st.markdown(f"""
 
 col1, col2 = st.columns([1.05, 1], gap="medium")
 
-# ── LEFT ─────────────────────────────────────────────────────────────────────
 with col1:
-
     st.markdown('<div class="sec">📋 Farm Details</div>', unsafe_allow_html=True)
     rows = [kv_row("Farm ID", v(row,'Farm ID')),
             kv_row("Farmer",  farmer_name),
@@ -383,7 +545,7 @@ with col1:
             act  = v(row, f'Kharif 25 Meter active / {i} (Y/N)')
             if ser or locm:
                 drows = [dkv_row("Active", badge(act))]
-                if ser:  drows.append(dkv_row("Serial",   ser,  code=True))
+                if ser:  drows.append(dkv_row("Serial", ser, code=True))
                 if locm: drows.append(dkv_row("Location", locm, code=True))
                 st.markdown(f'<div class="dev-card"><div class="dev-title">💧 Water Meter {i}</div>{"".join(drows)}</div>', unsafe_allow_html=True)
     else:
@@ -398,17 +560,11 @@ with col1:
             code  = v(row, f'Kharif 25 PVC Pipe code / {i}')
             loc_p = v(row, f'Kharif 25 PVC Pipe location / {i}')
             if loc_p:
-                drows = [
-                    dkv_row("Farm",    v(row,'Farm ID'),  code=True),
-                    dkv_row("Farmer",  farmer_name),
-                    dkv_row("Phone",   farmer_phone),
-                ]
-                if code:  drows.append(dkv_row("Code",     code,  code=True))
+                drows = [dkv_row("Farm", v(row,'Farm ID'), code=True), dkv_row("Farmer", farmer_name), dkv_row("Phone", farmer_phone)]
+                if code: drows.append(dkv_row("Code", code, code=True))
                 drows.append(dkv_row("Location", loc_p, code=True))
                 st.markdown(f'<div class="dev-card"><div class="dev-title">🔧 Pipe {i}</div>{"".join(drows)}</div>', unsafe_allow_html=True)
 
-
-# ── MAP ───────────────────────────────────────────────────────────────────────
 with col2:
     st.markdown('<div class="sec">🗺️ Farm Map</div>', unsafe_allow_html=True)
 
@@ -417,182 +573,100 @@ with col2:
     polygon_coords = parse_polygon(polygon_raw) if polygon_raw not in('','nan','None') else []
     tubewell_coord = parse_any(tubewell_raw)    if tubewell_raw not in('','nan','None') else None
 
-    def snap_inside_polygon(pt, poly, inset=0.00003):
+    def snap_inside_polygon(pt, poly):
         if not poly or not pt: return pt
         lat, lon = pt
         best = min(poly, key=lambda p: (p[0]-lat)**2 + (p[1]-lon)**2)
         clat_p = sum(p[0] for p in poly)/len(poly)
         clon_p = sum(p[1] for p in poly)/len(poly)
-        snapped_lat = best[0] + (clat_p - best[0]) * 0.15
-        snapped_lon = best[1] + (clon_p - best[1]) * 0.15
-        return (snapped_lat, snapped_lon)
+        return (best[0]+(clat_p-best[0])*0.15, best[1]+(clon_p-best[1])*0.15)
 
     def point_in_polygon(pt, poly):
         if not poly or not pt: return False
-        lat, lon = pt
-        n = len(poly)
-        inside = False
-        j = n - 1
+        lat, lon = pt; n = len(poly); inside = False; j = n-1
         for i in range(n):
-            xi, yi = poly[i]; xj, yj = poly[j]
-            if ((yi > lon) != (yj > lon)) and (lat < (xj - xi) * (lon - yi) / (yj - yi + 1e-10) + xi):
-                inside = not inside
-            j = i
+            xi,yi=poly[i]; xj,yj=poly[j]
+            if ((yi>lon)!=(yj>lon)) and (lat<(xj-xi)*(lon-yi)/(yj-yi+1e-10)+xi): inside=not inside
+            j=i
         return inside
 
     meter_locations = {}
     for i in [1,2]:
-        mloc = v(row,f'Kharif 25 Meter location / {i}')
-        mser = v(row,f'Kharif 25 Meter serial number / {i}')
-        mact = v(row,f'Kharif 25 Meter active / {i} (Y/N)')
+        mloc=v(row,f'Kharif 25 Meter location / {i}'); mser=v(row,f'Kharif 25 Meter serial number / {i}'); mact=v(row,f'Kharif 25 Meter active / {i} (Y/N)')
         if mser:
-            mc = parse_any(mloc) if mloc else None
-            meter_locations[i] = {'coord': mc, 'serial': mser, 'active': mact, 'loc_raw': mloc}
-
-    mappable_meters = {i: d for i, d in meter_locations.items() if d['coord']}
+            mc=parse_any(mloc) if mloc else None
+            meter_locations[i]={'coord':mc,'serial':mser,'active':mact,'loc_raw':mloc}
+    mappable_meters={i:d for i,d in meter_locations.items() if d['coord']}
 
     if polygon_coords:
-        clat = sum(c[0] for c in polygon_coords)/len(polygon_coords)
-        clon = sum(c[1] for c in polygon_coords)/len(polygon_coords)
-    elif mappable_meters:
-        clat,clon = list(mappable_meters.values())[0]['coord']
-    elif tubewell_coord:
-        clat,clon = tubewell_coord
-    else:
-        clat,clon = 30.41,76.42
+        clat=sum(c[0] for c in polygon_coords)/len(polygon_coords); clon=sum(c[1] for c in polygon_coords)/len(polygon_coords)
+    elif mappable_meters: clat,clon=list(mappable_meters.values())[0]['coord']
+    elif tubewell_coord:  clat,clon=tubewell_coord
+    else: clat,clon=30.41,76.42
 
     if not polygon_coords and not tubewell_coord and not mappable_meters:
-        st.markdown("""
-        <div style="background:#161b22;border:1px solid #30363d;border-radius:12px;
-             padding:40px 24px;text-align:center;margin-top:10px">
+        st.markdown("""<div style="background:#161b22;border:1px solid #30363d;border-radius:12px;padding:40px 24px;text-align:center;margin-top:10px">
           <div style="font-size:2.5rem;margin-bottom:12px">📭</div>
           <div style="color:#e6edf3;font-size:1.05rem;font-weight:600;margin-bottom:8px">Location Data Unavailable</div>
-          <div style="color:#8b949e;font-size:0.84rem;line-height:1.6">
-            This farm record exists in the Farm Master sheet<br>
-            but has no matching location data in Libertalia.<br><br>
-            <span style="color:#58a6ff">Farm details above are still complete.</span>
-          </div>
+          <div style="color:#8b949e;font-size:0.84rem;line-height:1.6">No matching location data in Libertalia.<br><span style="color:#58a6ff">Farm details above are still complete.</span></div>
         </div>""", unsafe_allow_html=True)
         st.stop()
 
     m = folium.Map(location=[clat,clon], zoom_start=16, tiles="OpenStreetMap")
-    folium.TileLayer(
-        tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-        attr='Esri', name='Satellite', overlay=False, control=True
-    ).add_to(m)
+    folium.TileLayer(tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',attr='Esri',name='Satellite',overlay=False,control=True).add_to(m)
     try:
         from folium.plugins import LocateControl
-        LocateControl(position='topleft', flyTo=True, locateOptions={"enableHighAccuracy":True}).add_to(m)
+        LocateControl(position='topleft',flyTo=True,locateOptions={"enableHighAccuracy":True}).add_to(m)
     except: pass
 
-    css = "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;min-width:210px;color:#24292f"
-
-    def nav_btn(lat, lon):
-        return (f'<a href="https://www.google.com/maps/dir/?api=1&destination={lat},{lon}" '
-                f'target="_blank" style="display:inline-block;background:#238636;color:#fff;'
-                f'padding:5px 12px;border-radius:6px;text-decoration:none;font-size:12px;'
-                f'font-weight:600;margin-top:8px">🧭 Navigate here</a>')
-
-    def popup_row(k, val):
-        return (f'<tr><td style="color:#6e7781;padding:3px 4px 3px 0;white-space:nowrap;vertical-align:top">{k}</td>'
-                f'<td style="padding:3px 0 3px 10px;font-weight:500;text-align:right">{val}</td></tr>')
-
-    def make_popup(hcolor, htitle, rh, lat, lon, mw=290):
-        html = (f'<div style="{css}"><div style="background:{hcolor};color:#fff;padding:8px 10px;'
-                f'border-radius:6px 6px 0 0;margin:-9px -9px 10px;font-weight:700">{htitle}</div>'
-                f'<table style="width:100%;border-collapse:collapse">{rh}</table>'
-                f'{nav_btn(lat,lon)}</div>')
-        return folium.Popup(html, max_width=mw)
+    css="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;min-width:210px;color:#24292f"
+    def nav_btn(lat,lon): return f'<a href="https://www.google.com/maps/dir/?api=1&destination={lat},{lon}" target="_blank" style="display:inline-block;background:#238636;color:#fff;padding:5px 12px;border-radius:6px;text-decoration:none;font-size:12px;font-weight:600;margin-top:8px">🧭 Navigate here</a>'
+    def popup_row(k,val): return f'<tr><td style="color:#6e7781;padding:3px 4px 3px 0;white-space:nowrap;vertical-align:top">{k}</td><td style="padding:3px 0 3px 10px;font-weight:500;text-align:right">{val}</td></tr>'
+    def make_popup(hcolor,htitle,rh,lat,lon,mw=290):
+        html=f'<div style="{css}"><div style="background:{hcolor};color:#fff;padding:8px 10px;border-radius:6px 6px 0 0;margin:-9px -9px 10px;font-weight:700">{htitle}</div><table style="width:100%;border-collapse:collapse">{rh}</table>{nav_btn(lat,lon)}</div>'
+        return folium.Popup(html,max_width=mw)
 
     if polygon_coords:
-        rh  = popup_row("Farmer",    farmer_name)
-        rh += popup_row("Phone",     farmer_phone)
-        rh += popup_row("Village",   village)
-        rh += popup_row("Block",     block)
-        ac = v(row,'Kharif 25 Acres farm / farmer reporting')
-        if ac: rh += popup_row("Acres", ac)
-        tp = clean_date(v(row,'Kharif 25 Paddy transplanting date (TPR)'))
-        hv = clean_date(v(row,'Kharif 25 Paddy Harvest date'))
-        if tp: rh += popup_row("Transplant", tp)
-        if hv: rh += popup_row("Harvest", hv)
-        folium.Polygon(locations=polygon_coords, color='#2ea043', fill=True,
-            fill_color='#3fb950', fill_opacity=0.25, weight=2.5,
-            tooltip="🌾 Click for farm details",
-            popup=make_popup('#0a3d1f', f'🌾 {v(row,"Farm ID")}', rh, clat, clon)
-        ).add_to(m)
+        rh=popup_row("Farmer",farmer_name)+popup_row("Phone",farmer_phone)+popup_row("Village",village)+popup_row("Block",block)
+        ac=v(row,'Kharif 25 Acres farm / farmer reporting')
+        if ac: rh+=popup_row("Acres",ac)
+        tp=clean_date(v(row,'Kharif 25 Paddy transplanting date (TPR)')); hv=clean_date(v(row,'Kharif 25 Paddy Harvest date'))
+        if tp: rh+=popup_row("Transplant",tp)
+        if hv: rh+=popup_row("Harvest",hv)
+        folium.Polygon(locations=polygon_coords,color='#2ea043',fill=True,fill_color='#3fb950',fill_opacity=0.25,weight=2.5,tooltip="🌾 Click for farm details",popup=make_popup('#0a3d1f',f'🌾 {v(row,"Farm ID")}',rh,clat,clon)).add_to(m)
 
-    if tubewell_coord:
-        rh  = popup_row("Farm",    v(row,'Farm ID'))
-        rh += popup_row("Farmer",  farmer_name)
-        rh += popup_row("Phone",   farmer_phone)
-        rh += popup_row("Village", village)
-        rh += popup_row("Block",   block)
-        ac = v(row,'Kharif 25 Acres farm / farmer reporting')
-        if ac: rh += popup_row("Acres", ac)
-        rh += popup_row("Meter(s)", f'<span style="color:#3fb950;font-weight:600">{", ".join(d["serial"] for d in meter_locations.values()) or "—"}</span>')
-        rh += popup_row("Lat", f"{tubewell_coord[0]:.6f}°N")
-        rh += popup_row("Lon", f"{tubewell_coord[1]:.6f}°E")
-        if not mappable_meters:
-            folium.Marker(location=tubewell_coord, tooltip="💧 Tubewell (no meter)",
-                popup=make_popup('#0d2137','💧 Tubewell',rh,*tubewell_coord),
-                icon=folium.Icon(color='blue',icon='tint',prefix='fa')).add_to(m)
+    if tubewell_coord and not mappable_meters:
+        rh=popup_row("Farm",v(row,'Farm ID'))+popup_row("Farmer",farmer_name)+popup_row("Phone",farmer_phone)+popup_row("Village",village)+popup_row("Block",block)
+        rh+=popup_row("Lat",f"{tubewell_coord[0]:.6f}°N")+popup_row("Lon",f"{tubewell_coord[1]:.6f}°E")
+        folium.Marker(location=tubewell_coord,tooltip="💧 Tubewell (no meter)",popup=make_popup('#0d2137','💧 Tubewell',rh,*tubewell_coord),icon=folium.Icon(color='blue',icon='tint',prefix='fa')).add_to(m)
 
-    for i, mdata in mappable_meters.items():
-        mc   = mdata['coord']
-        mser = mdata['serial']
-        mact = mdata['active']
-        mc_display = snap_inside_polygon(mc, polygon_coords) if polygon_coords and not point_in_polygon(mc, polygon_coords) else mc
-        rh  = popup_row("Serial", f'<b>{mser}</b>')
-        rh += popup_row("Active", mact)
-        rh += popup_row("Farmer", farmer_name)
-        rh += popup_row("Phone",  farmer_phone)
-        rh += popup_row("Lat", f"{mc[0]:.6f}°N")
-        rh += popup_row("Lon", f"{mc[1]:.6f}°E")
-        folium.Marker(location=mc_display, tooltip=f"🟣 Meter {i}: {mser}",
-            popup=make_popup('#4a0080',f'🟣 Water Meter {i}',rh,*mc_display,mw=260),
-            icon=folium.Icon(color='purple',icon='tint',prefix='fa')).add_to(m)
+    for i,mdata in mappable_meters.items():
+        mc=mdata['coord']; mser=mdata['serial']; mact=mdata['active']
+        mc_d=snap_inside_polygon(mc,polygon_coords) if polygon_coords and not point_in_polygon(mc,polygon_coords) else mc
+        rh=popup_row("Serial",f'<b>{mser}</b>')+popup_row("Active",mact)+popup_row("Farmer",farmer_name)+popup_row("Phone",farmer_phone)+popup_row("Lat",f"{mc[0]:.6f}°N")+popup_row("Lon",f"{mc[1]:.6f}°E")
+        folium.Marker(location=mc_d,tooltip=f"🟣 Meter {i}: {mser}",popup=make_popup('#4a0080',f'🟣 Water Meter {i}',rh,*mc_d,mw=260),icon=folium.Icon(color='purple',icon='tint',prefix='fa')).add_to(m)
 
     for i in [1,2,3,4,5]:
-        ploc  = v(row,f'Kharif 25 PVC Pipe location / {i}')
-        pcode = v(row,f'Kharif 25 PVC Pipe code / {i}')
+        ploc=v(row,f'Kharif 25 PVC Pipe location / {i}'); pcode=v(row,f'Kharif 25 PVC Pipe code / {i}')
         if ploc:
-            pc = parse_any(ploc)
+            pc=parse_any(ploc)
             if pc:
-                pc_display = snap_inside_polygon(pc, polygon_coords) if polygon_coords and not point_in_polygon(pc, polygon_coords) else pc
-                rh  = popup_row("Code",   f'<b>{pcode}</b>')
-                rh += popup_row("Farmer", farmer_name)
-                rh += popup_row("Phone",  farmer_phone)
-                rh += popup_row("Orig Lat", f"{pc[0]:.6f}°N")
-                rh += popup_row("Orig Lon", f"{pc[1]:.6f}°E")
-                pipe_icon = folium.DivIcon(
-                    html=('<div style="background:#c0392b;color:white;border-radius:50%;'
-                          'width:26px;height:26px;display:flex;align-items:center;'
-                          'justify-content:center;font-size:13px;border:2px solid #fff;'
-                          'box-shadow:0 2px 4px rgba(0,0,0,0.5)">🪧</div>'),
-                    icon_size=(26,26), icon_anchor=(13,13)
-                )
-                folium.Marker(location=pc_display, tooltip=f"🔴 Pipe {i}: {pcode}",
-                    popup=make_popup('#7b0000',f'🔴 PVC Pipe {i}',rh,*pc_display,mw=230),
-                    icon=pipe_icon).add_to(m)
+                pc_d=snap_inside_polygon(pc,polygon_coords) if polygon_coords and not point_in_polygon(pc,polygon_coords) else pc
+                rh=popup_row("Code",f'<b>{pcode}</b>')+popup_row("Farmer",farmer_name)+popup_row("Phone",farmer_phone)+popup_row("Orig Lat",f"{pc[0]:.6f}°N")+popup_row("Orig Lon",f"{pc[1]:.6f}°E")
+                pipe_icon=folium.DivIcon(html='<div style="background:#c0392b;color:white;border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-size:13px;border:2px solid #fff;box-shadow:0 2px 4px rgba(0,0,0,0.5)">🪧</div>',icon_size=(26,26),icon_anchor=(13,13))
+                folium.Marker(location=pc_d,tooltip=f"🔴 Pipe {i}: {pcode}",popup=make_popup('#7b0000',f'🔴 PVC Pipe {i}',rh,*pc_d,mw=230),icon=pipe_icon).add_to(m)
 
     folium.LayerControl().add_to(m)
     st_folium(m, width=None, height=490, returned_objects=[])
 
-    parts = ['<span style="color:#3fb950">■</span> Farm Polygon'] if polygon_coords else []
-    if tubewell_coord and not mappable_meters:
-        parts.append('<span style="color:#58a6ff">●</span> Tubewell')
-    if mappable_meters:
-        parts.append('<span style="color:#9b59b6">●</span> Water Meter')
-    if any(parse_any(v(row,f'Kharif 25 PVC Pipe location / {i}')) for i in[1,2,3,4,5]):
-        parts.append('<span style="color:#f85149">🪧</span> PVC Pipe')
-    if parts:
-        st.markdown(f'<div style="background:#161b22;border:1px solid #21262d;border-radius:8px;padding:8px 14px;font-size:0.8rem;color:#8b949e;margin-top:6px">{"&nbsp;&nbsp;".join(parts)}</div>', unsafe_allow_html=True)
+    parts=['<span style="color:#3fb950">■</span> Farm Polygon'] if polygon_coords else []
+    if tubewell_coord and not mappable_meters: parts.append('<span style="color:#58a6ff">●</span> Tubewell')
+    if mappable_meters: parts.append('<span style="color:#9b59b6">●</span> Water Meter')
+    if any(parse_any(v(row,f'Kharif 25 PVC Pipe location / {i}')) for i in[1,2,3,4,5]): parts.append('<span style="color:#f85149">🪧</span> PVC Pipe')
+    if parts: st.markdown(f'<div style="background:#161b22;border:1px solid #21262d;border-radius:8px;padding:8px 14px;font-size:0.8rem;color:#8b949e;margin-top:6px">{"&nbsp;&nbsp;".join(parts)}</div>',unsafe_allow_html=True)
 
-    rows_c = [kv_row("Center", f"{clat:.5f}°N, {clon:.5f}°E")]
-    nav_link = (f'<a href="https://www.google.com/maps/dir/?api=1&destination={clat},{clon}" '
-                f'target="_blank" style="background:#238636;color:#fff;padding:6px 14px;border-radius:6px;'
-                f'text-decoration:none;font-size:0.82rem;font-weight:600;display:inline-block;margin-top:8px">'
-                f'🧭 Open in Google Maps</a>')
-    st.markdown(f'<div class="card" style="margin-top:8px"><div class="card-title">Coordinates &amp; Navigation</div>{"".join(rows_c)}{nav_link}</div>', unsafe_allow_html=True)
+    rows_c=[kv_row("Center",f"{clat:.5f}°N, {clon:.5f}°E")]
+    nav_link=(f'<a href="https://www.google.com/maps/dir/?api=1&destination={clat},{clon}" target="_blank" style="background:#238636;color:#fff;padding:6px 14px;border-radius:6px;text-decoration:none;font-size:0.82rem;font-weight:600;display:inline-block;margin-top:8px">🧭 Open in Google Maps</a>')
+    st.markdown(f'<div class="card" style="margin-top:8px"><div class="card-title">Coordinates &amp; Navigation</div>{"".join(rows_c)}{nav_link}</div>',unsafe_allow_html=True)
 
-st.markdown(f'<hr style="border-color:#21262d;margin:20px 0"><p style="color:#484f58;font-size:0.76rem;text-align:center">🌍 Digital Village Project &nbsp;·&nbsp; Tel Aviv University &amp; Thapar University, Patiala &nbsp;·&nbsp; Research Lead: Dan Uriel Etgar &nbsp;·&nbsp; Dashboard: Satyam Yadav &nbsp;·&nbsp; {len(df)} farms</p>', unsafe_allow_html=True)
+st.markdown(f'<hr style="border-color:#21262d;margin:20px 0"><p style="color:#484f58;font-size:0.76rem;text-align:center">🌍 Digital Village Project &nbsp;·&nbsp; Tel Aviv University &amp; Thapar University, Patiala &nbsp;·&nbsp; Research Lead: Dan Uriel Etgar &nbsp;·&nbsp; Dashboard: Satyam Yadav &nbsp;·&nbsp; {len(df)} farms</p>',unsafe_allow_html=True)
